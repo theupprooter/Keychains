@@ -2,17 +2,19 @@ import os
 import requests
 import time
 import json
-import argparse
 import re
 import sys
 import datetime
+import math
+import threading
+import base64
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from github import Github, GithubException
 
 # Rich for beautiful terminal UI
 from rich.console import Console
 from rich.table import Table
-from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn
+from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, SpinnerColumn
 from rich.live import Live
 from rich.panel import Panel
 from rich.layout import Layout
@@ -21,68 +23,150 @@ from rich.align import Align
 # --- Configuration ---
 console = Console(stderr=True, highlight=False)
 
-# Search patterns, validation regex, and live validation endpoints
+# Confidence scoring based on file path patterns
+PATH_CONFIDENCE = {
+    re.compile(r'\.env(\.|$)', re.IGNORECASE): (0.99, "Environment File"),
+    re.compile(r'^\.env', re.IGNORECASE): (0.99, "Environment File"),
+    re.compile(r'credentials|secrets', re.IGNORECASE): (0.95, "Credentials/Secrets File"),
+    re.compile(r'settings\.py$', re.IGNORECASE): (0.90, "Django/Python Settings"),
+    re.compile(r'\/initializers\/', re.IGNORECASE): (0.85, "Rails Initializer"),
+    re.compile(r'config\.py|config\.json|config\.yml', re.IGNORECASE): (0.85, "Configuration File"),
+    re.compile(r'docker-compose\.yml', re.IGNORECASE): (0.80, "Docker Compose"),
+    re.compile(r'test', re.IGNORECASE): (0.30, "Test File"),
+    re.compile(r'example|sample|demo', re.IGNORECASE): (0.10, "Example/Demo Code"),
+    re.compile(r'\.md$|\.txt$', re.IGNORECASE): (0.05, "Documentation"),
+}
+
+# Enhanced service definitions with smarter dorks and heuristics
 SERVICE_DEFINITIONS = {
     'OpenAI': {
-        'pattern': 'sk-proj-[a-zA-Z0-9]{24} OR "sk-[a-zA-Z0-9]{48}"',
+        'search_dorks': [
+            '("sk-proj-" OR "sk-") AND ("OPENAI_API_KEY" OR "openai.api_key")',
+            '("sk-proj-" OR "sk-") AND ("os.getenv" OR "process.env")',
+            '("sk-proj-" OR "sk-") filename:.env',
+            '("sk-proj-" OR "sk-") language:python "import openai"',
+            '("sk-proj-" OR "sk-") language:javascript "new OpenAI"',
+            '("sk-proj-" OR "sk-") language:bash export',
+        ],
+        'negative_keywords': ['example', 'placeholder', 'your-api-key', 'YOUR_API_KEY', 'xxxxxxxx'],
         'regex': re.compile(r'sk-(proj-)?[a-zA-Z0-9]{24,48}'),
-        'validation': { 'method': 'GET', 'url': 'https://api.openai.com/v1/models', 'auth_type': 'bearer' }
+        'validation': { 'method': 'GET', 'url': 'https://api.openai.com/v1/models', 'auth_type': 'bearer' },
+        'entropy_threshold': 4.0
     },
     'Anthropic': {
-        'pattern': '"sk-ant-api03-[a-zA-Z0-9_-]{95}"',
+        'search_dorks': [
+            '"sk-ant-api03-" AND ("ANTHROPIC_API_KEY" OR "anthropic.api_key")',
+            '"sk-ant-api03-" filename:config.py',
+            '"sk-ant-api03-" language:typescript "Anthropic"',
+            '"sk-ant-api03-" filename:secrets.toml'
+        ],
+        'negative_keywords': ['example', 'placeholder'],
         'regex': re.compile(r'sk-ant-api03-[a-zA-Z0-9_-]{95}'),
-        'validation': { 'method': 'GET', 'url': 'https://api.anthropic.com/v1/ping', 'auth_type': 'header', 'header_name': 'x-api-key' }
+        'validation': { 'method': 'GET', 'url': 'https://api.anthropic.com/v1/ping', 'auth_type': 'header', 'header_name': 'x-api-key' },
+        'entropy_threshold': 4.5
     },
     'Cohere': {
-        'pattern': '"[a-zA-Z0-9]{40}"',
-        'query_prefix': 'COHERE_API_KEY=',
+        'search_dorks': [
+            '("COHERE_API_KEY" OR "cohere.Client" OR "CohereClient") -test -example',
+            'language:python "import cohere" "api_key="',
+            'language:javascript "new CohereClient("',
+        ],
+        'negative_keywords': ['placeholder', 'YOUR_COHERE_API_KEY'],
         'regex': re.compile(r'[a-zA-Z0-9]{40}'),
-        'validation': { 'method': 'GET', 'url': 'https://api.cohere.ai/v1/models', 'auth_type': 'bearer' }
+        'validation': { 'method': 'GET', 'url': 'https://api.cohere.ai/v1/models', 'auth_type': 'bearer' },
+        'entropy_threshold': 3.8
     },
     'HuggingFace': {
-        'pattern': '"hf_[a-zA-Z0-9]{35}"',
+        'search_dorks': [
+            '"hf_" AND ("HUGGING_FACE_HUB_TOKEN" OR "HF_TOKEN")',
+            '"huggingface_hub.login(token="hf_"',
+            '"hf_" filename:secrets.sh',
+            '"hf_" filename:.env'
+        ],
+        'negative_keywords': ['example', 'YOUR_TOKEN_HERE'],
         'regex': re.compile(r'hf_[a-zA-Z0-9]{35}'),
-        'validation': { 'method': 'GET', 'url': 'https://api-inference.huggingface.co/models', 'auth_type': 'bearer' }
+        'validation': { 'method': 'GET', 'url': 'https://api-inference.huggingface.co/models', 'auth_type': 'bearer' },
+        'entropy_threshold': 4.2
     },
     'GoogleAI': {
-        'pattern': 'AIzaSy[a-zA-Z0-9_-]{33}',
+        'search_dorks': [
+            '"AIzaSy" AND ("GOOGLE_API_KEY" OR "GEMINI_API_KEY")',
+            '"genai.configure(api_key=\\"AIzaSy"', # Escaped quote for exact match
+            '"AIzaSy" path:app/src/main',
+            '"AIzaSy" filename:.env',
+        ],
+        'negative_keywords': ['placeholder', 'YOUR_GOOGLE_API_KEY'],
         'regex': re.compile(r'AIzaSy[a-zA-Z0-9_-]{33}'),
-        'validation': { 'method': 'GET', 'url': 'https://generativelanguage.googleapis.com/v1beta/models', 'auth_type': 'query_param', 'param_name': 'key' }
+        'validation': { 'method': 'GET', 'url': 'https://generativelanguage.googleapis.com/v1beta/models', 'auth_type': 'query_param', 'param_name': 'key' },
+        'entropy_threshold': 4.3
     },
 }
 
 # Common filename patterns to exclude from search
 EXCLUSIONS = " -path:*.md -path:*.txt -path:*.lock -path:*.example -path:package.json -path:yarn.lock -path:pnpm-lock.yaml"
-CACHE_FILE = ".keyguardian_cache.json"
-PR_BODY_TEMPLATE = """### 🚨 Security Alert: Potential API Key Exposure
+CACHE_FILE = ".keychains_cache.json"
+ISSUE_BODY_TEMPLATE = """Hey :) this issue was automated through one of my programs aka keychains because it found a hard coded api key laying around.
 
-Hello! I am an automated security bot.
-
-I've detected a potential API key in your repository. To protect your credentials, I have created this pull request to redact the exposed key.
-
-- **File:** `{file_path}`
+Here is more information:
+- **File containing the key:** `{file_path}`
 - **Detected at:** `{timestamp}`
 
-Please review this change, invalidate the leaked key immediately with your service provider, and merge this PR.
+This issue was created to alert you about the exposed key. For security, you should **invalidate the key immediately** and then purge it from your repository's history.
 
----
-*Reported by KeyGuardian, on behalf of @theuzae at Instagram.*
+Stay safe!
 """
 
 # --- UI and Helper Functions ---
+class RateLimitHandler:
+    """Manages GitHub API rate limits with exponential backoff in a thread-safe manner."""
+    def __init__(self, log_file):
+        self._lock = threading.Lock()
+        self._backoff_factor = 1
+        self._log_file = log_file
+
+    def handle_error(self, headers):
+        """Called when a 403 rate limit error occurs. Sleeps the current thread."""
+        with self._lock:
+            reset_time = int(headers.get('x-ratelimit-reset', time.time() + 60))
+            wait_duration = max(0, reset_time - time.time())
+            sleep_time = (wait_duration + 2) * self._backoff_factor
+            
+            console.log(f"[bold red]Rate limit hit! Applying backoff factor {self._backoff_factor:.1f}. Pausing for {sleep_time:.1f}s...[/bold red]")
+            log_error(f"Rate limit exceeded. Backoff factor: {self._backoff_factor}. Pausing thread for {sleep_time:.1f}s.", self._log_file)
+            
+            self._backoff_factor = min(self._backoff_factor * 2, 16)
+        
+        time.sleep(sleep_time)
+
+    def request_succeeded(self):
+        """Resets the backoff factor after a successful request."""
+        with self._lock:
+            if self._backoff_factor > 1:
+                self._backoff_factor = 1
+                log_error("API request succeeded, resetting backoff factor to 1.", self._log_file)
+
 def display_banner():
     banner = """
-  _  __       _                  _ _           
- | |/ /      | |                | (_)          
- | ' /  _ __ | | __ _ _   _  ___ | |_  _ __   __ _ 
- |  <  | '_ \\| |/ _` | | | |/ _ \\| | || '_ \\ / _` |
- | . \\ | | | | | (_| | |_| | (_) | | || | | | (_| |
- |_|\\_\\|_| |_|_\\__,_|\\__, |\\___/|_|_||_| |_|\\__, |
-                      __/ |                 __/ |
-                     |___/                 |___/ 
+     _  __           _                 _               
+    | |/ /          | |               (_)              
+    | ' /  _ __   __| | __ _ _ __ __ _ _ _ __   __ _ 
+    |  <  | '_ \\ / _` |/ _` | '__/ _` | | '_ \\ / _` |
+    | . \\ | | | | (_| | (_| | | | (_| | | | | | (_| |
+    |_|\\_\\|_| |_|\\__,_|\\__,_|_|  \\__,_|_|_| |_|\\__, |
+                                               __/ |
+                                              |___/ 
     [bold]AI Key Scanner & Rotator[/bold]
     """
     console.print(Panel(Align.center(banner, vertical="middle"), style="cyan"), highlight=True)
+
+def log_error(message, log_file):
+    if not log_file: return
+    try:
+        with open(log_file, 'a') as f:
+            timestamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+            f.write(f"[{timestamp}] {message}\n")
+    except IOError as e:
+        console.print(f"[bold red]CRITICAL: Could not write to error log file '{log_file}': {e}[/bold red]")
 
 def load_cache():
     if os.path.exists(CACHE_FILE):
@@ -95,25 +179,36 @@ def save_cache(cache_data):
     with open(CACHE_FILE, 'w') as f:
         json.dump(list(cache_data), f)
 
-def is_false_positive(fragment):
-    lower_fragment = fragment.lower()
-    placeholders = ['xxxx', 'your_key', 'your-api-key', 'placeholder', '<key>', 'env.example']
-    if any(p in lower_fragment for p in placeholders): return True
-    
-    stripped_fragment = fragment.strip()
-    if stripped_fragment.startswith('#') or stripped_fragment.startswith('//') or stripped_fragment.startswith('/*'): return True
-    
-    return False
+def calculate_entropy(s: str) -> float:
+    if not s or len(s) == 0: return 0.0
+    p, lns = Counter(s), float(len(s))
+    return -sum(count/lns * math.log(count/lns, 2) for count in p.values())
+
+def get_path_confidence(path: str) -> tuple[float, str]:
+    for pattern, (score, desc) in PATH_CONFIDENCE.items():
+        if pattern.search(path):
+            return score, desc
+    return 0.2, "Generic Code File"
+
+def passes_heuristics(key_candidate, service_def, file_path, log_file):
+    entropy = calculate_entropy(key_candidate)
+    entropy_threshold = service_def.get('entropy_threshold', 3.5)
+    if entropy < entropy_threshold:
+        log_error(f"Rejected key '{key_candidate[:10]}...' due to low entropy ({entropy:.2f} < {entropy_threshold}).", log_file)
+        return False
+
+    confidence, _ = get_path_confidence(file_path)
+    if confidence < 0.15:
+        log_error(f"Rejected key from low-confidence path '{file_path}' (Confidence: {confidence:.2f}).", log_file)
+        return False
+        
+    return True
 
 # --- Mode: SCAN ---
 
 def create_dashboard_layout():
     layout = Layout(name="root")
-    layout.split(
-        Layout(name="header", size=10),
-        Layout(ratio=1, name="main"),
-        Layout(size=3, name="footer")
-    )
+    layout.split(Layout(name="header", size=10), Layout(ratio=1, name="main"), Layout(size=4, name="footer"))
     layout["main"].split_row(Layout(name="side"), Layout(name="body", ratio=2))
     return layout
 
@@ -122,125 +217,124 @@ def get_leaks_table():
     table.add_column("Service", style="cyan", no_wrap=True)
     table.add_column("Repository", style="magenta")
     table.add_column("File URL", style="yellow")
-    table.add_column("Report PR", style="green")
+    table.add_column("Confidence", style="bold blue")
+    table.add_column("Issue Status", style="green")
     return table
 
 def check_rate_limit(headers):
     try:
-        response = requests.get("https://api.github.com/rate_limit", headers=headers)
-        response.raise_for_status()
-        data = response.json()['resources']['search']
-        return data['remaining']
+        r = requests.get("https://api.github.com/rate_limit", headers=headers)
+        r.raise_for_status()
+        return r.json()['resources']['search']['remaining']
     except requests.exceptions.RequestException:
         return 0
 
-def scan_service(service, definition, headers, no_forks, progress, task_id):
-    pattern = definition.get('query_prefix', '') + definition['pattern']
-    full_query = f'{pattern}{EXCLUSIONS}' + (' -fork:true' if no_forks else '')
-    params = {'q': full_query, 'per_page': 100}
-    
-    try:
-        response = requests.get('https://api.github.com/search/code', headers=headers, params=params)
-        response.raise_for_status()
-        results = response.json().get('items', [])
-        progress.update(task_id, advance=1, description=f"[green]Scanned {service} ({len(results)} found)[/green]")
-        return service, results
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 403:
-            progress.update(task_id, description=f"[bold red]Rate limited on {service}. Waiting...[/bold red]")
-            time.sleep(60)
-        else:
-            progress.update(task_id, description=f"[red]API error on {service}[/red]")
-    except requests.exceptions.RequestException:
-        progress.update(task_id, description=f"[red]Network error on {service}[/red]")
-    
-    return service, []
+def run_queries_for_service(service, definition, headers, no_forks, progress, task_id, log_file, rate_limit_handler):
+    dorks = definition['search_dorks']
+    negatives = ' '.join([f'NOT "{n}"' for n in definition.get('negative_keywords', [])])
+    unique_items_found = {}
 
-def create_pr_for_leak(leak, token, console):
-    try:
-        g = Github(token)
-        user = g.get_user()
-        repo_to_fork = g.get_repo(leak['repository'])
-
-        # Fork the repository
-        my_fork = user.create_fork(repo_to_fork)
-        console.log(f"[grey50]Forked {repo_to_fork.full_name} to {my_fork.full_name}[/grey50]")
-
-        time.sleep(5) # Give GitHub a moment to create the fork properly
-
-        # Create a new branch
-        branch_name = f"keyguardian-patch-{int(time.time())}"
-        default_branch = my_fork.get_branch(my_fork.default_branch)
-        my_fork.create_git_ref(ref=f"refs/heads/{branch_name}", sha=default_branch.commit.sha)
-
-        # Get file content and redact key
-        file_contents = my_fork.get_contents(leak['file'], ref=branch_name)
-        decoded_content = file_contents.decoded_content.decode('utf-8')
-        redacted_content = decoded_content.replace(leak['key_snippet'], '[REDACTED_BY_KEYGUARDIAN]')
+    for i, dork in enumerate(dorks):
+        progress.update(task_id, description=f"[cyan]Scanning {service}[/cyan] (Query {i+1}/{len(dorks)})")
         
-        # Commit the change
-        commit_message = f"chore: Redact exposed API key in {leak['file']}"
-        my_fork.update_file(leak['file'], commit_message, redacted_content.encode('utf-8'), file_contents.sha, branch=branch_name)
+        full_query = f'{dork} {negatives}{EXCLUSIONS}' + (' -fork:true' if no_forks else '')
+        params = {'q': full_query, 'per_page': 100}
+        
+        retries = 3
+        while retries > 0:
+            try:
+                response = requests.get('https://api.github.com/search/code', headers=headers, params=params)
+                response.raise_for_status()
+                rate_limit_handler.request_succeeded()
+                for item in response.json().get('items', []):
+                    unique_items_found[item['html_url']] = item
+                break
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 403 and 'rate limit exceeded' in e.response.text.lower():
+                    retries -= 1
+                    rate_limit_handler.handle_error(e.response.headers)
+                    if retries > 0:
+                        progress.update(task_id, description=f"[bold yellow]Rate limited on {service}. Retrying... ({retries} left)[/bold yellow]")
+                    else:
+                        log_error(f"API error on {service}: Failed dork '{dork}' after multiple retries.", log_file)
+                else:
+                    log_error(f"API error on {service} with dork '{dork}': {e}", log_file)
+                    break
+            except requests.exceptions.RequestException as e:
+                log_error(f"Network error on {service}: {e}", log_file)
+                break
+        progress.update(task_id, advance=1)
 
-        # Create Pull Request
-        pr_body = PR_BODY_TEMPLATE.format(
-            file_path=leak['file'],
-            timestamp=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
-        )
-        pr = repo_to_fork.create_pull(
-            title=f"Security: Redact Exposed API Key in {leak['file']}",
-            body=pr_body,
-            head=f"{user.login}:{branch_name}",
-            base=repo_to_fork.default_branch
-        )
-        return pr.html_url
-    except GithubException as e:
-        console.log(f"[red]GitHub API Error during reporting for {leak['repository']}: {e.data.get('message', str(e))}[/red]")
-        return "Failed"
-    except Exception as e:
-        console.log(f"[red]An unexpected error occurred during reporting: {e}[/red]")
-        return "Failed"
+    progress.update(task_id, description=f"[bold green]Finished {service}[/bold green]")
+    return service, list(unique_items_found.values())
+
+def create_leak_issue(leak, token, log_file):
+    repo_full_name = leak['repository']
+    headers = {'Authorization': f'token {token}', 'Accept': 'application/vnd.github.v3+json'}
+    
+    issue_title = f"Security Vulnerability: Hardcoded API Key in {leak['file']}"
+    issue_body = ISSUE_BODY_TEMPLATE.format(
+        file_path=leak['file'],
+        timestamp=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+    )
+    
+    payload = {"title": issue_title, "body": issue_body}
+    url = f"https://api.github.com/repos/{repo_full_name}/issues"
+
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        
+        if response.status_code == 201:
+            return "[green]Issue Created[/green]"
+        elif response.status_code == 410:
+            log_error(f"Could not create issue for {repo_full_name}: Issues are disabled.", log_file)
+            return "[grey50]Issues N/A[/grey50]"
+        else:
+            response.raise_for_status()
+            
+    except requests.exceptions.RequestException as e:
+        log_error(f"Failed to create issue for {repo_full_name}: {e}", log_file)
+        return "[red]Issue Failed[/red]"
+
+    return "[bold red]Issue Error[/bold red]"
+
 
 def run_scan(args):
-    TOKEN = os.getenv('GITHUB_TOKEN')
+    TOKEN = args.token or os.getenv('GITHUB_TOKEN')
     if not TOKEN:
-        console.print("[bold red]GITHUB_TOKEN environment variable not set.[/bold red]")
+        console.print("[bold red]GitHub token not found. Please provide one or set GITHUB_TOKEN.[/bold red]")
         return
 
     HEADERS = {'Authorization': f'token {TOKEN}', 'Accept': 'application/vnd.github.v3.text-match+json'}
     if check_rate_limit(HEADERS) == 0:
         console.print("[bold red]Initial GitHub search rate limit is zero. Exiting.[/bold red]")
         return
-
+        
+    rate_limit_handler = RateLimitHandler(args.error_log_file)
     services_to_scan = {k: v for k, v in SERVICE_DEFINITIONS.items() if args.services.lower() == 'all' or k in args.services.split(',')}
     cache = load_cache()
 
-    # Setup Dashboard
     layout = create_dashboard_layout()
-    display_banner() # Print banner once outside live
+    display_banner()
     
     config_panel = Panel(
         f"[b]Services[/b]: {', '.join(services_to_scan.keys())}\n"
         f"[b]Exclude Forks[/b]: {'Yes' if args.no_forks else 'No'}\n"
-        f"[b]Auto-Report[/b]: {'[green]Yes[/green]' if args.report else 'No'}\n"
+        f"[b]Auto-Report (Issue)[/b]: {'[green]Yes[/green]' if args.report else 'No'}\n"
         f"[b]Duration[/b]: {f'{args.duration} mins' if args.duration > 0 else 'Run once'}",
-        title="[bold blue]Scan Configuration[/bold blue]",
-        border_style="blue"
+        title="[bold blue]Scan Configuration[/bold blue]", border_style="blue"
     )
     
-    progress = Progress(
-        TextColumn("[bold blue]{task.description}", justify="right"),
-        BarColumn(bar_width=None),
-        "[progress.percentage]{task.percentage:>3.0f}%",
-        TimeElapsedColumn()
-    )
-    scan_task = progress.add_task("Scanning Services", total=len(services_to_scan))
-    
+    progress = Progress(SpinnerColumn(), TextColumn("[progress.description]", justify="left"), BarColumn(), "[progress.percentage]{task.percentage:>3.0f}%", TimeElapsedColumn())
     leaks_table = get_leaks_table()
 
     layout["side"].update(Panel(progress, title="[b]Progress[/b]"))
     layout["body"].update(leaks_table)
-    layout["footer"].update(config_panel)
+
+    countdown_container = Layout(name="countdown")
+    footer_layout = Layout()
+    footer_layout.split_row(config_panel, countdown_container)
+    layout["footer"].update(footer_layout)
 
     total_found_leaks = []
     
@@ -252,62 +346,64 @@ def run_scan(args):
             current_time = time.time()
             if args.duration > 0 and current_time >= end_time:
                 break
+            
+            if args.duration > 0:
+                remaining_seconds = max(0, end_time - current_time)
+                mins, secs = divmod(int(remaining_seconds), 60)
+                countdown_text = f"[bold yellow]{mins:02d}:{secs:02d}[/bold yellow]"
+            else:
+                countdown_text = "Single Run"
 
-            with ThreadPoolExecutor(max_workers=args.workers) as scan_executor, \
-                 ThreadPoolExecutor(max_workers=args.workers) as report_executor:
+            countdown_panel = Panel(Align.center(countdown_text, vertical="middle"), title="[bold blue]Time Remaining[/bold blue]", border_style="blue")
+            countdown_container.update(countdown_panel)
+
+            scan_tasks = {s: progress.add_task(f"[cyan]Scanning {s}[/cyan]", total=len(d['search_dorks'])) for s, d in services_to_scan.items()}
+
+            with ThreadPoolExecutor(max_workers=args.workers) as scan_executor, ThreadPoolExecutor(max_workers=args.workers) as report_executor:
+                scan_futures = {scan_executor.submit(run_queries_for_service, s, d, HEADERS, args.no_forks, progress, scan_tasks[s], args.error_log_file, rate_limit_handler): s for s, d in services_to_scan.items()}
                 
-                scan_futures = {scan_executor.submit(scan_service, s, d, HEADERS, args.no_forks, progress, scan_task): s for s, d in services_to_scan.items()}
-                
+                report_futures_map = {}
+
                 for future in as_completed(scan_futures):
                     service, items = future.result()
                     definition = SERVICE_DEFINITIONS[service]
                     
                     for item in items:
-                        file_url = item['html_url']
-                        if file_url in cache: continue
-
-                        fragment = item['text_matches'][0]['fragment']
-                        if is_false_positive(fragment): continue
-                        
-                        match = definition['regex'].search(fragment)
+                        if item['html_url'] in cache: continue
+                        match = definition['regex'].search(item['text_matches'][0]['fragment'])
                         if not match: continue
                         
                         key_found = match.group(0)
-                        leak_details = {
-                            "service": service, 
-                            "repository": item['repository']['full_name'], 
-                            "file": item['path'], 
-                            "url": file_url, 
-                            "key_snippet": key_found
-                        }
+                        if not passes_heuristics(key_found, definition, item['path'], args.error_log_file): continue
                         
-                        cache.add(file_url)
+                        confidence, conf_desc = get_path_confidence(item['path'])
+                        
+                        leak_details = { "service": service, "repository": item['repository']['full_name'], "file": item['path'], "url": item['html_url'], "key_snippet": key_found, "confidence": confidence, "confidence_description": conf_desc }
+                        
+                        cache.add(item['html_url'])
                         total_found_leaks.append(leak_details)
                         
-                        pr_url = "[grey50]N/A[/grey50]"
+                        issue_status = "[grey50]N/A[/grey50]"
                         if args.report:
-                            pr_url = "[yellow]Reporting...[/yellow]"
-                            report_future = report_executor.submit(create_pr_for_leak, leak_details, TOKEN, console)
-                            leak_details['report_future'] = report_future
+                            issue_status = "[yellow]Creating Issue...[/yellow]"
+                            report_future = report_executor.submit(create_leak_issue, leak_details, TOKEN, args.error_log_file)
+                            report_futures_map[report_future] = (leaks_table.row_count, 4) # (row_index, col_index)
 
-                        leaks_table.add_row(service, item['repository']['full_name'], file_url, pr_url)
-                        
-            # Update PR links after they are created
-            if args.report:
-                for leak in total_found_leaks:
-                    if 'report_future' in leak and leak['report_future'].done():
-                        pr_result = leak['report_future'].result()
-                        # This is tricky in a live table update; for simplicity, we print results to console log
-                        # A more complex state management would be needed to update rows.
-                        del leak['report_future']
+                        confidence_str = f"{int(confidence*100)}% ({conf_desc})"
+                        leaks_table.add_row(service, item['repository']['full_name'], item['html_url'], confidence_str, issue_status)
+
+                for future in as_completed(report_futures_map):
+                    row, col = report_futures_map[future]
+                    issue_status_result = future.result()
+                    leaks_table.rows[row].cells[col] = issue_status_result
+                    leaks_table.rows[row].end_section = True
 
 
-            if args.duration == 0:
-                break
+            if args.duration == 0: break
             
             live.console.log(f"Cycle complete. Waiting 60s...")
             time.sleep(60)
-            progress.reset(scan_task)
+            for task_id in scan_tasks.values(): progress.remove_task(task_id)
 
     console.print(Panel(f"Scan Complete. Found [bold green]{len(total_found_leaks)}[/bold green] new leaks.", style="bold green"))
     
@@ -315,18 +411,15 @@ def run_scan(args):
         try:
             existing_leaks = []
             if os.path.exists(args.output):
-                 with open(args.output, 'r') as f_read:
-                    try: existing_leaks = json.load(f_read)
+                 with open(args.output, 'r') as f:
+                    try: existing_leaks = json.load(f)
                     except json.JSONDecodeError: pass
             
-            for leak in total_found_leaks:
-                if 'report_future' in leak: del leak['report_future'] # Don't save future objects
-
-            with open(args.output, 'w') as f_write:
-                json.dump(existing_leaks + total_found_leaks, f_write, indent=2)
+            with open(args.output, 'w') as f:
+                json.dump(existing_leaks + total_found_leaks, f, indent=2)
             console.print(f"Results saved to [cyan u]{args.output}[/cyan u]")
         except IOError as e:
-            console.print(f"[bold red]Could not write to output file: {e}[/bold red]")
+            log_error(f"Could not write to output file: {e}", args.error_log_file)
     
     save_cache(cache)
 
@@ -353,64 +446,103 @@ def run_rotate(args):
     display_banner()
     service = args.service
     if service not in SERVICE_DEFINITIONS:
-        console.print(f"[bold red]Service '{service}' is not defined. Available: {', '.join(SERVICE_DEFINITIONS.keys())}[/bold red]")
+        log_error(f"Service '{service}' is not defined.", args.error_log_file)
         sys.exit(1)
         
     if not os.path.exists(args.key_file):
-        console.print(f"[bold red]Key file not found at '{args.key_file}'. Please run a scan first to generate it.[/bold red]")
+        log_error(f"Key file not found at '{args.key_file}'.", args.error_log_file)
         sys.exit(1)
 
     with open(args.key_file, 'r') as f:
         try: all_keys = json.load(f)
         except json.JSONDecodeError:
-            console.print(f"[bold red]Could not parse JSON from '{args.key_file}'.[/bold red]")
+            log_error(f"Could not parse JSON from '{args.key_file}'.", args.error_log_file)
             sys.exit(1)
 
     service_keys = [item for item in all_keys if item['service'] == service]
     if not service_keys:
-        console.print(f"[bold red]No keys for service '{service}' found in '{args.key_file}'.[/bold red]")
+        log_error(f"No keys for service '{service}' found in '{args.key_file}'.", args.error_log_file)
         sys.exit(1)
 
     console.print(f"Found [cyan]{len(service_keys)}[/cyan] potential keys for [bold]{service}[/bold]. Validating...")
     
     for item in service_keys:
-        key = item['key_snippet']
-        console.print(f"Testing key from [magenta]{item['repository']}[/magenta]...")
+        key, repo = item['key_snippet'], item['repository']
+        console.print(f"Testing key from [magenta]{repo}[/magenta]...")
         is_valid, reason = validate_key(service, key, SERVICE_DEFINITIONS[service])
         
         if is_valid:
             console.print(f"[bold green]SUCCESS: Found a working {service} key.[/bold green]")
-            print(key) # Print the key to stdout for capture
+            print(key)
             sys.exit(0)
         else:
-            console.print(f"  -> [yellow]Key is not active. Reason: {reason}[/yellow]")
+            log_error(f"Key from {repo} is not active. Reason: {reason}", args.error_log_file)
             
-    console.print(f"[bold red]Failed to find any working keys for {service} after trying {len(service_keys)} candidates.[/bold red]")
+    log_error(f"Failed to find any working keys for {service}.", args.error_log_file)
     sys.exit(1)
 
 # --- Main Execution ---
+def get_input(prompt, default=None, optional=False):
+    prompt_text = f"{prompt} "
+    if default is not None: prompt_text += f"[default: {default}]: "
+    elif optional: prompt_text += f"[optional, press Enter to skip]: "
+    else: prompt_text += ": "
+    value = input(prompt_text).strip()
+    return value or (default if default is not None else value)
+
+def get_bool_input(prompt, default='n'):
+    val = input(f"{prompt} (y/n) [default: {default}]: ").lower().strip() or default
+    return val == 'y'
+
+def get_int_input(prompt, default=0):
+    while True:
+        val_str = input(f"{prompt} [default: {default}]: ").strip() or str(default)
+        try: return int(val_str)
+        except ValueError: console.print("[bold red]Invalid input. Please enter a number.[/bold red]")
+
 def main():
-    parser = argparse.ArgumentParser(description="KeyGuardian: A tool for finding and managing AI API keys on GitHub.")
-    subparsers = parser.add_subparsers(dest="command", required=True, help="Available commands")
+    display_banner()
+    
+    command = ""
+    while command not in ["scan", "rotate"]:
+        command = get_input("Enter command (scan / rotate)").lower()
 
-    # Parser for 'scan' command
-    parser_scan = subparsers.add_parser("scan", help="Scan GitHub for exposed API keys with a live dashboard.")
-    parser_scan.add_argument("--output", "-o", help="Save results to a JSON file.", metavar="FILENAME")
-    parser_scan.add_argument("--services", "-s", help="Comma-separated list of services to scan.", default="all")
-    parser_scan.add_argument("--workers", "-w", help="Number of concurrent threads.", type=int, default=5)
-    parser_scan.add_argument("--no-forks", help="Exclude forked repositories.", action="store_true")
-    parser_scan.add_argument("--duration", "-d", help="Duration to run the scan in minutes.", type=int, default=0)
-    parser_scan.add_argument("--report", help="Automatically create a pull request to fix found leaks.", action="store_true")
-    parser_scan.set_defaults(func=run_scan)
+    if command == "scan":
+        console.print("\n--- [bold blue]Configure Scan Parameters[/bold blue] ---\n")
+        
+        token = get_input("Enter GitHub Token (or press Enter to use GITHUB_TOKEN env var)", optional=True)
+        output = get_input("Enter filename to save results (e.g., findings.json)", optional=True)
+        services = get_input("Services to scan (comma-separated or 'all')", default="all")
+        workers = get_int_input("Number of concurrent workers", default=5)
+        no_forks = get_bool_input("Exclude forked repositories from search results?", default='n')
+        duration = get_int_input("Duration to run in minutes (0 for single run)", default=0)
+        report = get_bool_input("Automatically create a GitHub issue to report the leak?", default='n')
+        error_log_file = get_input("Enter filename to log errors (e.g., errors.log)", optional=True)
 
-    # Parser for 'rotate' command
-    parser_rotate = subparsers.add_parser("rotate", help="Fetch a validated, working API key from a file.")
-    parser_rotate.add_argument("--service", "-s", required=True, help="The service for which to fetch a key (e.g., OpenAI).")
-    parser_rotate.add_argument("--key-file", "-k", default="findings.json", help="Path to the JSON file with keys.", metavar="FILENAME")
-    parser_rotate.set_defaults(func=run_rotate)
+        class Args: pass
+        args = Args()
+        args.token, args.output, args.services, args.workers, args.no_forks, args.duration, args.report, args.error_log_file = \
+            token or None, output or None, services, workers, no_forks, duration, report, error_log_file or None
+        
+        run_scan(args)
 
-    args = parser.parse_args()
-    args.func(args)
+    elif command == "rotate":
+        console.print("\n--- [bold blue]Configure Key Rotation[/bold blue] ---\n")
+        
+        service = ""
+        while not service or service not in SERVICE_DEFINITIONS:
+            service = get_input(f"Enter the service for the key (e.g., OpenAI)").strip()
+            if service and service not in SERVICE_DEFINITIONS:
+                console.print(f"[bold red]Invalid. Choose from: {', '.join(SERVICE_DEFINITIONS.keys())}[/bold red]")
+        
+        key_file = get_input("Path to the JSON file with keys", default="findings.json")
+        error_log_file = get_input("Enter filename to log errors", optional=True)
+
+        class Args: pass
+        args = Args()
+        args.service, args.key_file, args.error_log_file = service, key_file, error_log_file or None
+        run_rotate(args)
+
 
 if __name__ == "__main__":
     main()
