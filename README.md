@@ -8,6 +8,10 @@ Command-line tool for discovering and managing AI API keys in public GitHub repo
 
 ## Concurrent scanning of public repos for exposed API keys.
 
+
+
+- ⚠️ NOTE: A BASIC SCAN WILL NOT SAVE THE FOUND API KEYS SPECIFY THE SAVE FILENAME BEFORE SCANNING. for more info refer to the #populate-key-pool
+
 **Features**
 - Real-time terminal dashboard
 - Multi-threaded scanning
