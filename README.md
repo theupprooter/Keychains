@@ -24,7 +24,7 @@ Scan public GitHub repositories for exposed API keys **concurrently**.
 
 **Note: ⚠️**  
 A basic scan will **not save** found API keys. Specify a save filename before scanning.  
-For more details, refer to [Populate Key Pool](https://github.com/theupprooter/Keychains/blob/main/README.md#populate-key-pool).
+For more details, refer to [Populate Key Pool](https://github.com/theupprooter/Keychains/tree/main?tab=readme-ov-file#workflow).
 
 #### Features
 
