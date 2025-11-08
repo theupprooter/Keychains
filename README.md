@@ -1,4 +1,4 @@
-# Keychains: AI Key Scanner & Rotator
+# Keychains: API Key Scanner & Rotator
 
 Command-line tool for discovering and managing AI API keys in public GitHub repositories.
 
@@ -46,22 +46,22 @@ Usage
 keychains-public.py --help
 ```
 ```
-python keychains.ts scan
+python keychains-public.py scan
 ```
 
 # Scan and create issues
 ```
-python keychains.ts scan --report --output findings.json
+python keychains-public.py scan --report --output findings.json
 ```
 
 # Scan specific services
 ```
-python keychains.ts scan --services OpenAI,Cohere
+python keychains-public.py scan --services OpenAI,Cohere
 ```
 
 # Run for specific duration (minutes)
 ```
-python keychains.ts scan -d 30 --output findings.json
+python keychains-public.py scan -d 30 --output findings.json
 ```
 
 
@@ -75,12 +75,12 @@ Workflow
 
 # Populate key pool
 ```
-python keychains.ts scan --output findings.json
+python keychains-public.py scan --output findings.json
 ```
 
 # Rotate key for service
 ```
-export OPENAI_API_KEY=$(python keychains.ts rotate --service OpenAI --key-file findings.json)
+export OPENAI_API_KEY=$(python keychains-public.py rotate --service OpenAI --key-file findings.json)
 ```
 
 Arguments
