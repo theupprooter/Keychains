@@ -39,6 +39,12 @@ pip install requests rich
 Usage
 
 # Scan all services
+
+# use --help for more
+
+```
+keychains-public.py --help
+```
 ```
 python keychains.ts scan
 ```
