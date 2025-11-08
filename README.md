@@ -5,7 +5,8 @@ Command-line tool for discovering and managing AI API keys in public GitHub repo
 ## Modes
 
 ### 1. Scan Mode (`scan`)
-Concurrent scanning of public repos for exposed API keys.
+
+## Concurrent scanning of public repos for exposed API keys.
 
 **Features**
 - Real-time terminal dashboard
@@ -18,6 +19,7 @@ Concurrent scanning of public repos for exposed API keys.
 - GitHub account with `public_repo` PAT
 
 **Setup**
+GENERATE A GITHUB TOKEN BEFORE THIS AT: https://github.com/settings/personal-access-tokens/new
 ```bash
 # macOS/Linux
 export GITHUB_TOKEN="your_token_here"
