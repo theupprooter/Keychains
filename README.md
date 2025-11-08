@@ -1,136 +1,88 @@
-# keychains: AI Key Scanner & Rotator
+# Keychains: AI Key Scanner & Rotator
 
-This project provides a powerful command-line tool with two primary functions:
-1.  **Scan Mode:** A professional-grade script that concurrently scans public GitHub repositories for exposed AI API keys, featuring a real-time dashboard and optional automatic issue creation to warn owners.
-2.  **Rotate Mode:** A utility to fetch a single, validated, working API key from a pool of previously found keys, for use in other applications.
+Command-line tool for discovering and managing AI API keys in public GitHub repositories.
 
-**DISCLAIMER:** This tool searches public data on GitHub. Use it responsibly. The goal is to find and help fix security vulnerabilities, not to exploit them. Using API keys that do not belong to you is against the terms of service of most providers and may be illegal.
+## Modes
 
----
+### 1. Scan Mode (`scan`)
+Concurrent scanning of public repos for exposed API keys.
 
-## Legal Disclaimer
+**Features**
+- Real-time terminal dashboard
+- Multi-threaded scanning
+- Optional automated GitHub issue creation
+- State management to avoid duplicates
 
-This tool is provided for **educational and security research purposes only**. The intended use is to help developers and security professionals identify and remediate accidental exposure of sensitive API keys in public repositories.
+**Prerequisites**
+- Python 3.7+
+- GitHub account with `public_repo` PAT
 
-By using this software, you agree to the following:
-
--   You will **only use this tool on repositories you are authorized to scan**.
--   You will **not use any discovered API keys for malicious or unauthorized purposes**. Accessing or using API keys that do not belong to you may be a violation of the service provider's terms of service and could be illegal.
--   The author of this tool is **not responsible for any of your actions**. Any misuse of this software is strictly your own responsibility, and the author assumes no liability for any direct or indirect damages caused by the use or misuse of this tool.
-
-**Use this tool ethically and responsibly.**
-
----
-
-## Mode 1: Scanning for Leaks (`scan` command)
-
-This is the core discovery engine. It's a command-line script you run on your computer to find API keys. It's designed for speed and accuracy, featuring:
--   **Live Dashboard:** A clean, terminal-based dashboard showing real-time scan progress and a table of confirmed leaks.
--   **Automatic Issue Creation:** An optional feature to automatically create a GitHub issue in the repository to alert the owner about the leak.
--   **Concurrent Scanning:** Scans for multiple key types at once using multi-threading.
--   **State Management:** Remembers leaks it has already found to avoid duplicate reports.
-
-### Prerequisites
-- Python 3.7+ installed on your machine.
-- A GitHub account.
-
-### Step 1: Get a GitHub Personal Access Token (PAT)
-
-The script needs a GitHub token to talk to the GitHub API.
-
-1.  Go to **[github.com/settings/tokens](https://github.com/settings/tokens)**.
-2.  Click **"Generate new token"** and select **"Generate new token (classic)"**.
-3.  Give your token a name (e.g., "keychainsScanner").
-4.  Set an expiration date.
-5.  Under **"Select scopes"**, check the **`public_repo`** scope. This is required to create issues in public repositories.
-6.  Click **"Generate token"**.
-7.  **IMPORTANT:** Copy your new token immediately. You won't be able to see it again!
-
-### Step 2: Set the Environment Variable
-
-For security, use an environment variable to store your token.
-
-**On macOS / Linux:**
+**Setup**
 ```bash
+# macOS/Linux
 export GITHUB_TOKEN="your_token_here"
-```
-*(Note: Add this to your `~/.zshrc` or `~/.bashrc` to make it permanent.)*
 
-**On Windows (Command Prompt):**
-```cmd
+# Windows (CMD)
 set GITHUB_TOKEN="your_token_here"
-```
 
-### Step 3: Install Dependencies
-```bash
 pip install requests rich
 ```
+Usage
 
-### Step 4: Run the Scanner
-
-**Basic Scan (all services):**
-This will run the scanner with the new dashboard and print all confirmed new leaks.
-```bash
+# Scan all services
+```
 python keychains.ts scan
 ```
 
-**Scan and Create GitHub Issues:**
-This will scan for leaks and, for each one found, automatically create a GitHub issue in the repository to alert the owner.
-```bash
+# Scan and create issues
+```
 python keychains.ts scan --report --output findings.json
 ```
 
-### Advanced Scanning Usage
-
-**Scan for Specific Services:**
-```bash
+# Scan specific services
+```
 python keychains.ts scan --services OpenAI,Cohere
 ```
 
-**Run for a Specific Duration:**
-This tells the scanner to run continuously for 30 minutes, checking for new leaks periodically.
-```bash
+# Run for specific duration (minutes)
+```
 python keychains.ts scan -d 30 --output findings.json
 ```
 
+
 ---
 
-## Mode 2: Rotating API Keys (`rotate` command)
+2. Rotate Mode (rotate)
 
-This mode turns keychains into a key provider for your other applications. It reads a file of potential keys (generated by the `scan` command), finds one that is currently active and not rate-limited, and prints it for your program to use.
+Fetches a validated API key from a JSON pool (findings.json) for authorized applications.
 
-### **IMPORTANT: ETHICAL WARNING**
-The `rotate` feature is intended for educational purposes or for rotating keys that you are **authorized to use**. Using API keys found on public GitHub that do not belong to you is a violation of most providers' terms of service and may be illegal. **Use this feature responsibly and at your own risk.**
+Workflow
 
-### How it Works
-1.  You run `python keychains.ts scan --output findings.json` to create a pool of potential keys.
-2.  Your application, when it needs a key (or its current key fails), calls the `rotate` command.
-3.  The `rotate` command reads `findings.json`, finds the first key for the specified service that passes a live validation check, and prints *only the key string* to standard output.
-4.  Your application captures this output and uses the new key.
-
-### Usage Example
-
-Let's say you have another Python script, `my_app.py`, that needs an OpenAI API key. You can dynamically provide one like this from your shell:
-
-```bash
-# 1. Run the scan to populate your key file
+# Populate key pool
+```
 python keychains.ts scan --output findings.json
-
-# 2. Run your app, injecting a validated key as an environment variable
-export OPENAI_API_KEY=$(python keychains.ts rotate --service OpenAI --key-file findings.json)
-
-# 3. Check if the key was set and then run your app
-if [ -n "$OPENAI_API_KEY" ]; then
-    echo "Successfully fetched a new OpenAI key. Starting app..."
-    python my_app.py
-else
-    echo "Failed to fetch a working OpenAI key."
-fi
 ```
 
-### `rotate` Command Arguments
--   `--service <SERVICE>`, `-s <SERVICE>`: (Required) The service you need a key for. e.g., `OpenAI`.
--   `--key-file <FILENAME>`, `-k <FILENAME>`: The JSON file to read keys from. Defaults to `findings.json`.
+# Rotate key for service
+```
+export OPENAI_API_KEY=$(python keychains.ts rotate --service OpenAI --key-file findings.json)
+```
+
+Arguments
+```
+
+--service <SERVICE>, -s <SERVICE>: Required service
+
+--key-file <FILENAME>, -k <FILENAME>: Optional JSON key file (default findings.json)
+```
+
 
 ---
- 
+
+Legal & Ethical
+
+Authorized use only.
+
+Do not use discovered keys for unauthorized access.
+
+Author assumes no liability for misuse.
