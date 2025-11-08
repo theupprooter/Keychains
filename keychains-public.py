@@ -12,7 +12,7 @@ import aiohttp
 import argparse
 from collections import Counter
 
-# Rich for beautiful terminal UI
+# terminal UI
 from rich.console import Console
 from rich.table import Table
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, SpinnerColumn
@@ -36,7 +36,7 @@ PATH_CONFIDENCE = {
     re.compile(r'\.md$|\.txt$', re.IGNORECASE): (0.05, "Documentation"),
 }
 
-# Enhanced service definitions with smarter dorks and heuristics
+# service definitions 
 SERVICE_DEFINITIONS = {
     'OpenAI': {
         'search_dorks': [
