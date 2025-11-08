@@ -13,7 +13,12 @@ Command-line tool for discovering and managing AI API keys in public GitHub repo
 - Multi-threaded scanning
 - Optional automated GitHub issue creation
 - State management to avoid duplicates
-
+- Continously listen for specified duration for new leaks
+- Export collected data
+- Advanced Scanning
+- Filtered / Targeted scanning
+- Validation and rotation
+- what else do you need tf??
 **Prerequisites**
 - Python 3.7+
 - GitHub account with `public_repo` PAT
