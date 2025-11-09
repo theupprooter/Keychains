@@ -546,10 +546,10 @@ Examples:
   python keychains.ts scan
 
   # Scan for OpenAI keys, validate them, and create GitHub issues to report leaks
-  python keychains.ts scan --services OpenAI --report --validate --output findings.json
+  python keychains-public.py scan --services OpenAI --report --validate --output findings.json
   
   # Fetch a single working Cohere key from a file and print it for another program to use
-  export COHERE_API_KEY=$(python keychains.ts rotate --service Cohere --key-file findings.json)
+  export COHERE_API_KEY=$(python keychains-public.py rotate --service Cohere --key-file findings.json)
 """
     )
     parser.add_argument('--error-log-file', type=str, default="errors.log", help="File to log errors and non-critical information to.")
