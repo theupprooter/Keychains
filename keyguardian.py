@@ -1,4 +1,4 @@
-#  ML Key Validation using DeBERTa
+# keyguardian.ts - State-of-the-Art ML Key Validation using DeBERTa
 # NOTE: This file requires additional dependencies:
 # pip install onnxruntime numpy tokenizers transformers torch scikit-learn pandas optuna
 
@@ -24,7 +24,7 @@ try:
         EarlyStoppingCallback,
     )
     from torch.utils.data import Dataset
-    from onnx.quantization import quantize_dynamic, QuantType
+    from onnxruntime.quantization import quantize_dynamic, QuantType
     import optuna
     ML_DEPS_AVAILABLE = True
 except ImportError as e:
