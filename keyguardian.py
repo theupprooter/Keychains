@@ -1,4 +1,4 @@
-# keyguardian.ts - State-of-the-Art ML Key Validation using DeBERTa
+#  ML Key Validation using DeBERTa
 # NOTE: This file requires additional dependencies:
 # pip install onnxruntime numpy tokenizers transformers torch scikit-learn pandas optuna
 
