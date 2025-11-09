@@ -8,6 +8,7 @@ import re
 from typing import Optional
 
 # Dependency checking and graceful failure
+ML_DEPS_AVAILABLE = False
 try:
     import numpy as np
     import pandas as pd
@@ -25,9 +26,12 @@ try:
     from torch.utils.data import Dataset
     from onnx.quantization import quantize_dynamic, QuantType
     import optuna
-except ImportError:
-    print("Warning: ML dependencies not found. KeyGuardian will be disabled.")
-    print("Please run: pip install onnxruntime numpy tokenizers transformers torch scikit-learn pandas optuna")
+    ML_DEPS_AVAILABLE = True
+except ImportError as e:
+    print("Warning: One or more ML dependencies not found. KeyGuardian will be disabled.")
+    print(f"  > The specific error was: {e}")
+    print("  > Please ensure all of the following are installed in your active Python environment:")
+    print("  > pip install onnxruntime numpy tokenizers transformers torch scikit-learn pandas optuna")
     # Set all to None to ensure KeyGuardian class fails gracefully
     onnxruntime = np = pd = torch = optuna = None
 
@@ -46,15 +50,15 @@ class KeyGuardian:
         self.session: Optional[onnxruntime.InferenceSession] = None
         self.tokenizer: Optional[AutoTokenizer] = None
 
-        if onnxruntime is None:
-            print("ONNX Runtime is not available. ML filtering is disabled.")
+        if not ML_DEPS_AVAILABLE or onnxruntime is None:
+            # The warning has already been printed at import time.
             return
 
         model_file = os.path.join(vocab_path, model_path)
         
         if not os.path.exists(model_file):
             print(f"Warning: Model file not found at '{model_file}'. ML filtering is disabled.")
-            print("You can train a model by running: python keyguardian.ts --train")
+            print("You can train a model by running: python keyguardian.py --train")
             return
         
         try:
@@ -157,7 +161,7 @@ def compute_metrics(pred):
 
 def train_and_export_model(data_file: str, output_dir: str = ".", do_hyperparameter_search: bool = False, k_folds: int = 5):
     """State-of-the-art pipeline: hyperparameter search, k-fold cross-validation, and quantized export."""
-    if not all([pd, torch, optuna]):
+    if not ML_DEPS_AVAILABLE:
         print("Cannot train model: Missing one or more required ML libraries.")
         return
 
@@ -359,4 +363,4 @@ if __name__ == '__main__':
         else:
             train_and_export_model(args.data_file, do_hyperparameter_search=args.hyperparameter_search, k_folds=args.k_folds)
     else:
-        print("This script is for training the ML model.\nUse 'python keyguardian.ts --train' to start.")
+        print("This script is for training the ML model.\nUse 'python keyguardian.py --train' to start.")
