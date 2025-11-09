@@ -1,135 +1,109 @@
-# `keychains`: Key Scanner & Rotator
+# `keychains`: High-Performance AI Key Scanner
 
-`keychains` is a professional-grade command-line tool for discovering and managing exposed AI API keys in public GitHub repositories. It features a real-time terminal dashboard, concurrent scanning, and a state-of-the-art, self-learning ML filter to maximize accuracy.
+A professional, asynchronous command-line tool for discovering, validating, and reporting exposed API keys in public GitHub repositories. Version 3.0 introduces a powerful scanning engine and advanced filtering capabilities.
 
-> ### **Disclaimer**
-> This tool is provided for **educational and security research purposes only**. Its intended use is to help identify and remediate accidentally exposed API keys. By using this software, you agree to use it ethically and responsibly. The author is not responsible for your actions. **Do not use API keys that do not belong to you.**
-
----
-
-## Quick Start
-
-### 1. Prerequisites
-
--   Python 3.7+
--   A GitHub Personal Access Token (PAT) with `public_repo` scope.
-    -   Generate one at [**github.com/settings/tokens**](https://github.com/settings/tokens) (classic).
-
-### 2. Setup
-
-**Set your GitHub Token as an environment variable:**
-```bash
-# macOS / Linux
-export GITHUB_TOKEN="your_token_here"
-
-# Windows (Command Prompt)
-set GITHUB_TOKEN="your_token_here"
-```
-
-**Install core dependencies:**
-```bash
-pip install requests rich
-```
-
-### 3. Run a Scan
-```bash
-python keychains-public-v2x.py scan
-```
+> **Disclaimer:** This tool is for educational and security research purposes only. Use it ethically and responsibly to help remediate exposed credentials. The author is not responsible for your actions.
 
 ---
 
-## Core Features
+## Key Features
 
-### `scan` Command: Find Leaked Keys
+*   **Dynamic Search Engine:** Generates thousands of unique search queries ("dorks") to maximize discovery.
+*   **Asynchronous Core:** Utilizes `asyncio` and `aiohttp` for high-speed, concurrent scanning.
+*   **Multi-Layered Filtering:** Combines heuristics, entropy analysis, and a state-of-the-art ML model to drastically reduce false positives.
+*   **Key Validation & Reporting:** Verifies keys against service APIs and can automatically create GitHub issues or send webhook notifications.
+*   **Configuration Flexibility:** Manage all settings via command-line arguments or a central `keychains_config.yml` file.
+*   **Proxy Support:** Route validation traffic through an HTTP/S proxy to avoid rate-limiting.
 
-The `scan` command is the core discovery engine. It searches GitHub for keys, presenting findings in a live dashboard.
+---
 
-#### **Common Usage**
+## Installation
 
--   **Basic Scan (all services):**
+1.  **Prerequisites:**
+    *   Python 3.7+
+    *   A [GitHub Personal Access Token](https://github.com/settings/tokens) (classic) with `public_repo` scope is required for creating issues.
+
+2.  **Set Environment Variable:**
     ```bash
-    python keychains-public-v2x.py scan
+    # macOS / Linux
+    export GITHUB_TOKEN="your_github_pat_here"
+
+    # Windows (Command Prompt)
+    set GITHUB_TOKEN="your_github_pat_here"
     ```
 
--   **Scan, Validate, and Report Leaks:**
-    This command validates found keys, creates GitHub issues to alert owners, and saves results.
+3.  **Install Dependencies:**
     ```bash
-    python keychains-public-v2x.py scan --validate --report --output findings.json
+    pip install aiohttp pyyaml
     ```
 
--   **Scan for Specific Services:**
+---
+
+## Usage
+
+The primary command is `scan`. All operations are managed through its flags.
+
+**Common Examples:**
+
+*   **Run a basic scan and save results:**
     ```bash
-    python keychains-public-v2x.py scan --services OpenAI,Cohere
+    python keychains-public-v2x.py scan -o findings.json
     ```
 
--   **Continuous Scanning:**
-    Run the scanner continuously for a set duration (e.g., 30 minutes).
+*   **Scan, validate keys, and report valid leaks via GitHub issues:**
     ```bash
-    python keychains-public-v2x.py scan -d 30
+    python keychains-public-v2x.py scan --validate --report -o findings.json
     ```
 
-### `rotate` Command: Fetch a Working Key
+*   **Run a continuous 30-minute scan with webhook reporting:**
+    ```bash
+    python keychains-public-v2x.py scan -d 30 --validate --webhook-url "https://your.webhook/url"
+    ```
 
-The `rotate` command provides a single, validated API key from a pool of previously found keys. This is useful for rotating keys in other applications.
+*   **Use a configuration file for all settings:**
+    ```bash
+    python keychains-public-v2x.py scan --config-file keychains_config.yml
+    ```
 
-> **Warning:** This feature is for authorized use only. Using keys that are not yours violates provider terms of service and may be illegal.
-
-#### **Usage Example**
-
-Inject a validated key into your application's environment:
-
-```bash
-# 1. Populate your key file
-python keychains-public-v2x.py scan --services OpenAI --output findings.json
-
-# 2. Fetch a working key and export it
-export OPENAI_API_KEY=$(python keychains-public-v2x.py rotate --service OpenAI --key-file findings.json)
-
-# 3. Run your app
-if [ -n "$OPENAI_API_KEY" ]; then
-    echo "Key fetched. Starting app..."
-    python my_app.py
-else
-    echo "Failed to fetch a working key."
-fi
+### Example `keychains_config.yml`
+```yaml
+# keychains_config.yml
+token: "ghp_..." # Can be set here instead of env var
+services: "OpenAI,GoogleAI"
+workers: 20
+no_forks: true
+validate: true
+report: true
+webhook_url: "https://your.discord.webhook/..."
+proxy: "http://user:pass@127.0.0.1:8080"
+ml_filter: true
+ml_threshold: 0.9
 ```
 
 ---
 
-## Advanced: Self-Learning ML Filter
+## Advanced: The `KeyGuardian` ML Filter
 
-To minimize false positives, `keychains` includes a sophisticated, self-improving machine learning pipeline that fine-tunes a DeBERTa model on your collected data.
+For maximum accuracy, `keychains` integrates `KeyGuardian`, a sophisticated machine learning pipeline built on a DeBERTa model.
 
-### 1. Install ML Dependencies
+**1. Install ML Dependencies:**
 ```bash
 pip install onnxruntime numpy tokenizers transformers torch scikit-learn pandas optuna
 ```
 
-### 2. The Self-Learning Workflow
+**2. The Self-Learning Workflow:**
 
-**Step 1: Collect High-Quality Data**
-Run a scan with validation and data collection enabled. This automatically creates a labeled dataset from live results.
-```bash
-# Run for an extended period (e.g., 2 hours) to build a rich dataset
-python keychains-public-v2x.py scan -d 120 --validate --collect-data training_data.jsonl
-```
-
-**Step 2: Train a State-of-the-Art Model**
-This script runs a full MLOps pipeline, using automated hyperparameter tuning (Optuna) and cross-validation to build the most accurate model from your data.
-```bash
-# First time: run a hyperparameter search to find the best settings
-python keyguardian.py --train --data-file training_data.jsonl --hyperparameter-search
-
-# Subsequent runs on new data can use the optimized parameters
-python keyguardian.py --train --data-file training_data.jsonl
-```
-This generates a highly optimized `keyguardian.onnx` model file.
-
-**Step 3: Scan with Your Custom-Trained Filter**
-Enable the ML filter to leverage your custom model for superior accuracy.
-```bash
-python keychains-public-v2x.py scan --validate --ml-filter --ml-threshold 0.9
-```
-You can repeat this cycle to continuously improve your model's performance.
-
----
+*   **Collect Data:** Run a scan with validation enabled to create a labeled dataset.
+    ```bash
+    # Scan for 2 hours, validating keys and saving training examples
+    python keychains-public-v2x.py scan -d 120 --validate --collect-data training_data.jsonl
+    ```
+*   **Train Model:** Use the collected data to train a highly accurate `keyguardian.onnx` model.
+    ```bash
+    # Run hyperparameter search for the best results, then train
+    python keyguardian.py --train --data-file training_data.jsonl --hyperparameter-search
+    ```
+*   **Scan with Your Custom Filter:** Use your trained model for superior accuracy.
+    ```bash
+    python keychains-public-v2x.py scan --validate --ml-filter --ml-threshold 0.9
+    ```
