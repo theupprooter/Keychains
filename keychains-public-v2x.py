@@ -1,4 +1,4 @@
-# keychains.ts v.2.1.0 - Self-Learning ML Update
+# keychains.ts v.2.1.0 - - Self-Learning ML Update
 import os
 import requests
 import time
@@ -13,7 +13,7 @@ import argparse
 from collections import Counter
 from typing import Optional
 
-# Rich for beautiful terminal UI
+# Rich for terminal UI
 from rich.console import Console
 from rich.table import Table
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, SpinnerColumn
@@ -43,7 +43,7 @@ PATH_CONFIDENCE = {
     re.compile(r'\.md$|\.txt$', re.IGNORECASE): (0.05, "Documentation"),
 }
 
-# Enhanced service definitions with smarter dorks and heuristics
+# service definitions with dorks and heuristics
 SERVICE_DEFINITIONS = {
     'OpenAI': {
         'search_dorks': [
