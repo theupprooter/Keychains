@@ -1,4 +1,4 @@
-# keychains.ts v.2.0.0 - Live Key Validation Update
+#  v.2.0.0 - Live Key Validation Update
 import os
 import requests
 import time
