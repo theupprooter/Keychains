@@ -84,6 +84,8 @@ ml_threshold: 0.9
 
 ## Advanced: The `KeyGuardian` ML Filter
 
+- ⚠️ This feature is unstable and may crash on some devices, works on some..
+
 For maximum accuracy, `keychains` integrates `KeyGuardian`, a sophisticated machine learning pipeline built on a DeBERTa model.
 
 **1. Install ML Dependencies:**
