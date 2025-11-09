@@ -1,4 +1,4 @@
-# keychains.ts v3.0.0 
+# keychains.ts v3.0.0 - The Monster Update
 import os
 import requests
 import time
@@ -180,22 +180,33 @@ class Scanner:
 
     async def _generate_dorks(self) -> List[Tuple[str, str]]:
         dorks = []
-        services = {k: v for k, v in SERVICE_DEFINITIONS.items() if self.config['services'].lower() == 'all' or k in self.config['services'].split(',')}
+        services_to_scan = {k: v for k, v in SERVICE_DEFINITIONS.items() if self.config['services'].lower() == 'all' or k in self.config['services'].split(',')}
         
-        for service, definition in services.items():
-            components = definition.get('dork_components', {})
-            if not components: continue
-            
-            key_vars = [f"({ ' OR '.join(components.get('keys', [])) })", f"({ ' OR '.join(components.get('vars', [])) })"]
-            patterns = components.get('patterns', [])
-            meta = components.get('filenames', []) + components.get('extensions', [])
+        await self.dashboard.log(f"Generating dorks for services: {', '.join(services_to_scan.keys())}")
 
-            for combo in product(key_vars, patterns + meta):
-                if combo[0] and combo[1]:
-                    dorks.append((service, f"{combo[0]} AND {combo[1]}"))
+        for service, definition in services_to_scan.items():
+            components = definition.get('dork_components', {})
+            if not components:
+                continue
+
+            primary_keywords = components.get('keys', []) + components.get('vars', [])
+            qualifiers = components.get('filenames', []) + components.get('extensions', [])
+            patterns = components.get('patterns', [])
+
+            # Dorks combining a primary keyword with a qualifier
+            for keyword in primary_keywords:
+                for qualifier in qualifiers:
+                    dorks.append((service, f'{keyword} {qualifier}'))
+            
+            # Dorks for specific patterns
+            for pattern in patterns:
+                dorks.append((service, pattern))
+
+        # Remove duplicates while preserving order
+        unique_dorks = list(dict.fromkeys(dorks))
         
-        await self.dashboard.log(f"Generated {len(dorks)} dynamic search dorks.")
-        return dorks
+        await self.dashboard.log(f"Generated {len(unique_dorks)} unique, simplified search dorks.")
+        return unique_dorks
 
     async def run_scan(self) -> List[Dict[str, Any]]:
         dorks = await self._generate_dorks()
@@ -238,6 +249,8 @@ class Scanner:
                         for item in items:
                             item['found_for_service'] = service
                         return items
+                    elif response.status == 422:
+                        await self.dashboard.log(f"{Ansi.YELLOW}GitHub API rejected a query (422 Unprocessable). Query was likely too complex. Skipping.{Ansi.RESET}")
                     elif response.status in [403, 429]:
                         await self.dashboard.log(f"{Ansi.RED}Rate limit hit hard. Backing off...{Ansi.RESET}")
                         await asyncio.sleep(10)
