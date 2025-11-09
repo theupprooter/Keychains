@@ -1,4 +1,4 @@
-# keychains.ts v.2.1.0 - - Self-Learning ML Update
+#  v.2.1.0 - Self-Learning ML Update
 import os
 import requests
 import time
@@ -13,13 +13,6 @@ import argparse
 from collections import Counter
 from typing import Optional
 
-# Rich for terminal UI
-from rich.console import Console
-from rich.table import Table
-from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, SpinnerColumn
-from rich.panel import Panel
-from rich.align import Align
-
 try:
     from keyguardian import KeyGuardian, collect_training_data
 except ImportError:
@@ -27,7 +20,6 @@ except ImportError:
     collect_training_data = None
 
 # --- Configuration ---
-console = Console(stderr=True, highlight=False)
 
 # Confidence scoring based on file path patterns
 PATH_CONFIDENCE = {
@@ -43,7 +35,7 @@ PATH_CONFIDENCE = {
     re.compile(r'\.md$|\.txt$', re.IGNORECASE): (0.05, "Documentation"),
 }
 
-# service definitions with dorks and heuristics
+# dorks and heuristics
 SERVICE_DEFINITIONS = {
     'OpenAI': {
         'search_dorks': [
@@ -175,9 +167,9 @@ def display_banner():
     |_|\\_\\|_| |_|\\__,_|\\__,_|_|  \\__,_|_|_| |_|\\__, |
                                                __/ |
                                               |___/ 
-    [bold]AI Key Scanner & Rotator v2.1.0[/bold]
+    AI Key Scanner & Rotator v2.1.0
     """
-    console.print(Panel(Align.center(banner, vertical="middle"), style="cyan"), highlight=True)
+    print(banner)
 
 def log_error(message, log_file):
     if not log_file: return
@@ -186,7 +178,7 @@ def log_error(message, log_file):
             timestamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
             f.write(f"[{timestamp}] {message}\n")
     except IOError as e:
-        console.print(f"[bold red]CRITICAL: Could not write to error log file '{log_file}': {e}[/bold red]")
+        print(f"CRITICAL: Could not write to error log file '{log_file}': {e}", file=sys.stderr)
 
 def load_cache():
     if os.path.exists(CACHE_FILE):
@@ -235,15 +227,14 @@ async def check_rate_limit(headers, session):
     except (aiohttp.ClientError, json.JSONDecodeError):
         return 0
 
-async def run_queries_for_service(service, definition, headers, no_forks, progress, task_id, log_file, session, semaphore):
+async def run_queries_for_service(service, definition, headers, no_forks, log_file, session, semaphore):
     dorks = definition['search_dorks']
     negatives = ' '.join([f'NOT "{n}"' for n in definition.get('negative_keywords', [])])
     unique_items_found = {}
     backoff_factor = 1
 
     for i, dork in enumerate(dorks):
-        if progress:
-            progress.update(task_id, description=f"[cyan]Scanning {service}[/cyan] (Query {i+1}/{len(dorks)})")
+        print(f"-> Scanning {service} (Query {i+1}/{len(dorks)})")
         
         full_query = f'{dork} {negatives}{EXCLUSIONS}' + (' -fork:true' if no_forks else '')
         params = {'q': full_query, 'per_page': 100}
@@ -266,7 +257,7 @@ async def run_queries_for_service(service, definition, headers, no_forks, progre
                             wait_duration = max(0, reset_time - time.time())
                             sleep_time = (wait_duration + 2) * backoff_factor
 
-                            console.log(f"[bold red]Rate limit on {service}. Pausing for {sleep_time:.1f}s...[/bold red]")
+                            print(f"Rate limit on {service}. Pausing for {sleep_time:.1f}s...")
                             await asyncio.sleep(sleep_time)
                             backoff_factor = min(backoff_factor * 2, 16) # Increase backoff
                         else:
@@ -276,12 +267,8 @@ async def run_queries_for_service(service, definition, headers, no_forks, progre
                     log_error(f"Network error on {service} with dork '{dork}': {e}", log_file)
                     if retries <= 0: break
                     await asyncio.sleep(2 * (3 - retries)) # Simple backoff for network issues
-
-        if progress:
-            progress.update(task_id, advance=1)
     
-    if progress:
-        progress.update(task_id, description=f"[bold green]Finished {service}[/bold green]")
+    print(f"Finished scanning for {service}.")
     return service, list(unique_items_found.values())
 
 
@@ -302,24 +289,24 @@ async def create_leak_issue(leak, token, log_file, session, semaphore):
         try:
             async with session.post(url, headers=headers, json=payload, timeout=15) as response:
                 if response.status == 201:
-                    return "[green]Issue Created[/green]"
+                    return "Issue Created"
                 elif response.status == 410:
                     log_error(f"Could not create issue for {repo_full_name}: Issues are disabled.", log_file)
-                    return "[grey50]Issues N/A[/grey50]"
+                    return "Issues N/A"
                 else:
                     response.raise_for_status()
                     
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             log_error(f"Failed to create issue for {repo_full_name}: {e}", log_file)
-            return "[red]Issue Failed[/red]"
+            return "Issue Failed"
 
-    return "[bold red]Issue Error[/bold red]"
+    return "Issue Error"
 
 
 async def run_scan(args):
     TOKEN = args.token or os.getenv('GITHUB_TOKEN')
     if not TOKEN:
-        console.print("[bold red]GitHub token not found. Please provide one or set GITHUB_TOKEN.[/bold red]")
+        print("GitHub token not found. Please provide one or set GITHUB_TOKEN.", file=sys.stderr)
         return
 
     HEADERS = {'Authorization': f'token {TOKEN}', 'Accept': 'application/vnd.github.v3.text-match+json'}
@@ -328,29 +315,27 @@ async def run_scan(args):
     cache = load_cache()
     total_found_leaks = []
     validation_summary = Counter()
+    output_filename = args.output or "findings.json"
 
-    config_panel_text = (
-        f"[b]Services[/b]: {', '.join(services_to_scan.keys())}\n"
-        f"[b]Exclude Forks[/b]: {'Yes' if args.no_forks else 'No'}\n"
-        f"[b]Validate Keys[/b]: {'[green]Yes[/green]' if args.validate else 'No'}\n"
-        f"[b]Auto-Report (Issue)[/b]: {'[green]Yes[/green]' if args.report else 'No'}\n"
-        f"[b]ML Filter[/b]: {'[green]Yes[/green]' if args.ml_filter else 'No'} (Threshold: {args.ml_threshold})\n"
-        f"[b]Data Collection[/b]: {'[green]Yes[/green]' if args.collect_data else 'No'}"
-        f"{' ([bold]Self-learning enabled w/ --validate[/bold])' if args.collect_data and args.validate else ''}\n"
-        f"[b]Duration[/b]: {f'{args.duration} mins' if args.duration > 0 else 'Run once'}"
-    )
-    config_panel = Panel(
-        config_panel_text,
-        title="[bold blue]Scan Configuration[/bold blue]", border_style="blue"
-    )
-    console.print(config_panel)
+    config_panel_text = f"""
+--- Scan Configuration ---
+Services: {', '.join(services_to_scan.keys())}
+Exclude Forks: {'Yes' if args.no_forks else 'No'}
+Validate Keys: {'Yes' if args.validate else 'No'}
+Auto-Report (Issue): {'Yes' if args.report else 'No'}
+ML Filter: {'Yes' if args.ml_filter else 'No'} (Threshold: {args.ml_threshold})
+Data Collection: {'Yes' if args.collect_data else 'No'}{' (Self-learning enabled w/ --validate)' if args.collect_data and args.validate else ''}
+Duration: {f'{args.duration} mins' if args.duration > 0 else 'Run once'}
+--------------------------
+"""
+    print(config_panel_text)
 
     guardian = None
     if args.ml_filter:
         if KeyGuardian:
             guardian = KeyGuardian(model_path=args.ml_model)
         else:
-            console.print("[bold red]ML Filter enabled, but dependencies are missing. Please install them.[/bold red]")
+            print("ML Filter enabled, but dependencies are missing. Please install them.", file=sys.stderr)
 
 
     semaphore = asyncio.Semaphore(args.workers)
@@ -358,7 +343,7 @@ async def run_scan(args):
     async with aiohttp.ClientSession(headers=HEADERS) as session, aiohttp.ClientSession() as validation_session:
         initial_rate_limit = await check_rate_limit(HEADERS, session)
         if initial_rate_limit == 0:
-            console.print("[bold red]Initial GitHub search rate limit is zero. Exiting.[/bold red]")
+            print("Initial GitHub search rate limit is zero. Exiting.", file=sys.stderr)
             return
 
         start_time = time.time()
@@ -368,17 +353,14 @@ async def run_scan(args):
         while True:
             run_cycle += 1
             if args.duration > 0:
-                console.print(f"\n[bold cyan]--- Starting Scan Cycle {run_cycle} ---[/bold cyan]")
+                print(f"\n--- Starting Scan Cycle {run_cycle} ---")
             
             new_leaks_in_cycle = []
-            scan_progress = Progress(SpinnerColumn(), TextColumn("[progress.description]", justify="left"), BarColumn(), "[progress.percentage]{task.percentage:>3.0f}%", TimeElapsedColumn())
             
-            with scan_progress as progress:
-                scan_tasks = {s: progress.add_task(f"[cyan]Scanning {s}[/cyan]", total=len(d['search_dorks'])) for s, d in services_to_scan.items()}
-                
-                tasks = [run_queries_for_service(s, d, HEADERS, args.no_forks, progress, scan_tasks[s], args.error_log_file, session, semaphore) for s, d in services_to_scan.items()]
-                
-                results = await asyncio.gather(*tasks)
+            print("Querying GitHub API for potential leaks...")
+            tasks = [run_queries_for_service(s, d, HEADERS, args.no_forks, args.error_log_file, session, semaphore) for s, d in services_to_scan.items()]
+            results = await asyncio.gather(*tasks)
+            print("\nGitHub queries complete. Processing results...")
 
             for service, items in results:
                 definition = SERVICE_DEFINITIONS[service]
@@ -404,17 +386,14 @@ async def run_scan(args):
                             continue
                     
                     validation_status_text = "Not Checked"
-                    validation_status_rich = "[grey50]Not Checked[/grey50]"
                     is_valid_for_training: Optional[bool] = None
 
                     if args.validate:
                         is_valid, reason = await validate_key(service, key_found, definition, validation_session)
                         validation_status_text = reason
                         if is_valid:
-                            validation_status_rich = f"[bold green]{reason}[/bold green]"
                             is_valid_for_training = True
                         else:
-                            validation_status_rich = f"[bold red]{reason}[/bold red]"
                             if reason == "Invalid/Forbidden":
                                 is_valid_for_training = False
 
@@ -428,7 +407,7 @@ async def run_scan(args):
                         "service": service, "repository": item['repository']['full_name'], "file": item['path'],
                         "url": item['html_url'], "key_snippet": key_found, "confidence": confidence,
                         "confidence_description": conf_desc, "validation_status": validation_status_text,
-                        "validation_status_rich": validation_status_rich, "issue_status": "[grey50]N/A[/grey50]"
+                        "issue_status": "N/A"
                     }
                     
                     cache.add(item['html_url'])
@@ -437,66 +416,54 @@ async def run_scan(args):
             total_found_leaks.extend(new_leaks_in_cycle)
 
             if args.report and new_leaks_in_cycle:
-                console.print(f"\n[bold]Found {len(new_leaks_in_cycle)} new leaks. Creating GitHub issues...[/bold]")
+                print(f"\nFound {len(new_leaks_in_cycle)} new leaks. Creating GitHub issues...")
                 report_tasks = [create_leak_issue(leak, TOKEN, args.error_log_file, session, semaphore) for leak in new_leaks_in_cycle]
                 issue_statuses = await asyncio.gather(*report_tasks)
                 for leak, status in zip(new_leaks_in_cycle, issue_statuses):
                     leak["issue_status"] = status
             
             if new_leaks_in_cycle:
-                leaks_table = Table(title="[bold green]Newly Confirmed Leaks[/bold green]", expand=True)
-                leaks_table.add_column("Service", style="cyan", no_wrap=True)
-                leaks_table.add_column("Repository", style="magenta")
-                leaks_table.add_column("File URL", style="yellow")
-                leaks_table.add_column("Confidence", style="bold blue")
-                leaks_table.add_column("Validation", style="white")
-                leaks_table.add_column("Issue Status", style="green")
-
+                print("\n--- Newly Confirmed Leaks ---")
                 for leak in new_leaks_in_cycle:
                     confidence_str = f"{int(leak['confidence']*100)}% ({leak['confidence_description']})"
-                    leaks_table.add_row(leak['service'], leak['repository'], leak['url'], confidence_str, leak['validation_status_rich'], leak['issue_status'])
-                console.print(leaks_table)
+                    print(f"  Service: {leak['service']}")
+                    print(f"  Repository: {leak['repository']}")
+                    print(f"  File URL: {leak['url']}")
+                    print(f"  Confidence: {confidence_str}")
+                    print(f"  Validation: {leak['validation_status']}")
+                    print(f"  Issue Status: {leak['issue_status']}")
+                    print("--------------------")
             else:
-                console.print("\n[bold]No new leaks found in this cycle.[/bold]")
+                print("\nNo new leaks found in this cycle.")
 
             if args.duration == 0 or time.time() >= end_time:
                 break
             
-            console.print(f"\nCycle complete. Waiting 60s...")
+            print(f"\nCycle complete. Waiting 60s...")
             await asyncio.sleep(60)
 
-    # Build and display the final summary panel
-    summary_text = f"Scan Complete. Found a total of [bold green]{len(total_found_leaks)}[/bold green] new leaks."
+    summary_text = f"Scan Complete. Found a total of {len(total_found_leaks)} new leaks."
     if args.validate and total_found_leaks:
-        status_colors = { "Active": "green", "Invalid/Forbidden": "red", "Rate-Limited": "yellow" }
         summary_items = []
-        # Sort for consistent output
         for status, count in sorted(validation_summary.items()):
-            color = status_colors.get(status, "white")
-            summary_items.append(f"[{color}]{count} {status}[/{color}]")
-        
-        summary_text += f"\n\n[b]Validation Summary[/b]: {', '.join(summary_items)}"
+            summary_items.append(f"{count} {status}")
+        summary_text += f"\n\nValidation Summary: {', '.join(summary_items)}"
     
-    console.print(Panel(summary_text, title="[bold green]Scan Results[/bold green]", border_style="green"))
+    print("\n--- Scan Results ---")
+    print(summary_text)
+    print("--------------------")
     
-    if args.output and total_found_leaks:
+    if total_found_leaks:
         try:
             existing_leaks = []
-            if os.path.exists(args.output):
-                 with open(args.output, 'r') as f:
+            if os.path.exists(output_filename):
+                 with open(output_filename, 'r') as f:
                     try: existing_leaks = json.load(f)
                     except json.JSONDecodeError: pass
             
-            cleaned_leaks = []
-            for leak in total_found_leaks:
-                clean_leak = leak.copy()
-                clean_leak.pop('validation_status_rich', None)
-                clean_leak['issue_status'] = re.sub(r'\[/?.*?\]', '', clean_leak['issue_status'])
-                cleaned_leaks.append(clean_leak)
-
-            with open(args.output, 'w') as f:
-                json.dump(existing_leaks + cleaned_leaks, f, indent=2)
-            console.print(f"Results saved to [cyan u]{args.output}[/cyan u]")
+            with open(output_filename, 'w') as f:
+                json.dump(existing_leaks + total_found_leaks, f, indent=2)
+            print(f"Results saved to {output_filename}")
         except IOError as e:
             log_error(f"Could not write to output file: {e}", args.error_log_file)
     
@@ -524,32 +491,32 @@ async def validate_key(service, key, definition, session):
 async def run_rotate(args):
     service = args.service
     if service not in SERVICE_DEFINITIONS:
-        console.print(f"[bold red]Error: Service '{service}' is not defined.[/bold red]")
+        print(f"Error: Service '{service}' is not defined.", file=sys.stderr)
         log_error(f"Service '{service}' is not defined.", args.error_log_file)
         sys.exit(1)
         
     if not os.path.exists(args.key_file):
-        console.print(f"[bold red]Error: Key file not found at '{args.key_file}'.[/bold red]")
+        print(f"Error: Key file not found at '{args.key_file}'.", file=sys.stderr)
         log_error(f"Key file not found at '{args.key_file}'.", args.error_log_file)
         sys.exit(1)
 
     with open(args.key_file, 'r') as f:
         try: all_keys = json.load(f)
         except json.JSONDecodeError:
-            console.print(f"[bold red]Error: Could not parse JSON from '{args.key_file}'.[/bold red]")
+            print(f"Error: Could not parse JSON from '{args.key_file}'.", file=sys.stderr)
             log_error(f"Could not parse JSON from '{args.key_file}'.", args.error_log_file)
             sys.exit(1)
 
     service_keys = [item for item in all_keys if item.get('service') == service]
     if not service_keys:
-        console.print(f"[bold yellow]No keys for service '{service}' found in '{args.key_file}'.[/bold yellow]")
+        print(f"No keys for service '{service}' found in '{args.key_file}'.", file=sys.stderr)
         log_error(f"No keys for service '{service}' found in '{args.key_file}'.", args.error_log_file)
         sys.exit(1)
 
     service_keys.reverse()
     service_keys.sort(key=lambda x: x.get('confidence', 0), reverse=True)
 
-    console.print(f"Found [cyan]{len(service_keys)}[/cyan] potential keys for [bold]{service}[/bold]. Validating concurrently...")
+    print(f"Found {len(service_keys)} potential keys for {service}. Validating concurrently...")
     
     async with aiohttp.ClientSession() as session:
         tasks = [asyncio.create_task(validate_key(service, item['key_snippet'], SERVICE_DEFINITIONS[service], session)) for item in service_keys]
@@ -561,7 +528,7 @@ async def run_rotate(args):
             try:
                 is_valid, reason = await future
                 if is_valid:
-                    console.print(f"[bold green]SUCCESS: Found a working {service} key from [magenta]{repo}[/magenta].[/bold green]")
+                    print(f"SUCCESS: Found a working {service} key from {repo}.")
                     
                     if args.json_output:
                         print(json.dumps(item, indent=2))
@@ -573,7 +540,7 @@ async def run_rotate(args):
             except Exception as exc:
                 log_error(f"An error occurred validating key from {repo}: {exc}", args.error_log_file)
     
-    console.print(f"[bold red]Failed to find any working keys for {service} after checking all candidates.[/bold red]")
+    print(f"Failed to find any working keys for {service} after checking all candidates.", file=sys.stderr)
     log_error(f"Failed to find any working keys for {service}.", args.error_log_file)
     sys.exit(1)
 
@@ -585,11 +552,11 @@ def main():
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="""
 Examples:
-  # Run a basic scan for all services and show the results
+  # Run a basic scan for all services, results save to findings.json by default
   python keychains.ts scan
 
   # Scan for OpenAI keys, validate them, and create GitHub issues to report leaks
-  python keychains.ts scan --services OpenAI --report --validate --output findings.json
+  python keychains.ts scan --services OpenAI --report --validate --output openai_findings.json
   
   # Fetch a single working Cohere key from a file and print it for another program to use
   export COHERE_API_KEY=$(python keychains.ts rotate --service Cohere --key-file findings.json)
@@ -606,7 +573,7 @@ Examples:
         description='Scans public GitHub repositories for exposed API keys using a variety of search dorks and heuristics. Displays results and can optionally report findings by creating issues.'
     )
     scan_parser.add_argument('--token', type=str, default=None, help='GitHub Personal Access Token. If not provided, defaults to GITHUB_TOKEN environment variable.')
-    scan_parser.add_argument('--output', '-o', type=str, help='File to save JSON results of found leaks to.')
+    scan_parser.add_argument('--output', '-o', type=str, help='File to save JSON results to. Defaults to "findings.json".')
     scan_parser.add_argument('--services', '-s', type=str, default='all', help='Comma-separated list of services to scan for (e.g., OpenAI,Cohere). Defaults to "all".')
     scan_parser.add_argument('--workers', '-w', type=int, default=10, help='Max number of concurrent requests to GitHub.')
     scan_parser.add_argument('--no-forks', action='store_true', help='Exclude forked repositories from search results.')
@@ -646,7 +613,7 @@ Examples:
             else:
                 args.func(args)
         except KeyboardInterrupt:
-            console.print("\n[bold yellow]Operation cancelled by user.[/bold yellow]")
+            print("\nOperation cancelled by user.")
             sys.exit(0)
 
 if __name__ == "__main__":
